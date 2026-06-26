@@ -1,0 +1,16 @@
+[Unit]
+Description=Gevin Metal System (Gradio)
+After=network.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__APP_DIR__
+Environment=PORT=__APP_PORT__
+ExecStart=__APP_DIR__/.venv/bin/python app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
