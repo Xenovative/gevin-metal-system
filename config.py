@@ -1,10 +1,18 @@
 from pathlib import Path
 
-BASE_DIR = Path(__file__).parent
+# Resolve to absolute paths so the app works regardless of cwd (systemd, nohup, etc.)
+BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = BASE_DIR / "templates" / "invoice_template.xlsx"
 OUTPUT_DIR = BASE_DIR / "output" / "invoices"
 REPORT_DIR = BASE_DIR / "output" / "reports"
 DB_PATH = BASE_DIR / "data" / "gevin.db"
+LOG_DIR = BASE_DIR / "logs"
+
+
+def ensure_runtime_dirs() -> None:
+    """Create data/output directories on Linux/macOS/Windows before first use."""
+    for path in (OUTPUT_DIR, REPORT_DIR, DB_PATH.parent, LOG_DIR, TEMPLATE_PATH.parent):
+        path.mkdir(parents=True, exist_ok=True)
 
 ITEM_TYPES = [
     "足金 Pure Gold",

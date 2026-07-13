@@ -33,12 +33,16 @@ def build_inventory_movements(transaction_type, main_items, exchange_items=None)
             tael = item.get("weight_tael")
             if tael is None:
                 tael = 0
+            oz = item.get("weight_oz")
+            if oz is None:
+                oz = 0
             movements.append({
                 "direction": dir_override or direction,
                 "item_type": item.get("item_type", ""),
                 "quality": item.get("quality", ""),
                 "weight_gram": gram,
                 "weight_tael": tael,
+                "weight_oz": oz,
             })
 
     if direction == "exchange":

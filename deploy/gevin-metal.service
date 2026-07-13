@@ -1,5 +1,5 @@
 [Unit]
-Description=Gevin Metal System (Gradio)
+Description=Gevin Metal Invoice and Inventory System
 After=network.target
 
 [Service]
@@ -8,8 +8,9 @@ User=__APP_USER__
 Group=__APP_USER__
 WorkingDirectory=__APP_DIR__
 Environment=PORT=__APP_PORT__
-ExecStart=__APP_DIR__/.venv/bin/python app.py
-Restart=always
+Environment=GRADIO_ANALYTICS_ENABLED=False
+ExecStart=__APP_DIR__/.venv/bin/python __APP_DIR__/app.py
+Restart=on-failure
 RestartSec=5
 
 [Install]

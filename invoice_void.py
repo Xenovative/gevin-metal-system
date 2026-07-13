@@ -46,6 +46,7 @@ def void_invoice(session, invoice_no, admin_user):
                 quality=movement.quality,
                 weight_gram=movement.weight_gram,
                 weight_tael=movement.weight_tael,
+                weight_oz=getattr(movement, "weight_oz", 0) or 0,
                 movement_date=datetime.now().date(),
                 customer_name=movement.customer_name,
                 handler=admin_user.get("display_name", ""),

@@ -15,7 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from auth import ensure_default_admin
-from config import DB_PATH, INVOICE_STATUS_ACTIVE
+from config import DB_PATH, INVOICE_STATUS_ACTIVE, ensure_runtime_dirs
 
 Base = declarative_base()
 
@@ -53,12 +53,14 @@ class Invoice(Base):
     invoice_no = Column(String(50), unique=True, nullable=False)
     transaction_type = Column(String(50), nullable=False)
     customer_name = Column(String(100), nullable=False)
+    customer_phone = Column(String(50))
     transaction_date = Column(Date, nullable=False)
     handler = Column(String(100))
     payment_method = Column(Text)
     notes = Column(Text)
     note_amount = Column(Float, default=0)
     total_amount = Column(Float, default=0)
+    invoice_currency = Column(String(20), default="HKD$")
     excel_path = Column(String(500))
     source_location = Column(String(50))
     destination_location = Column(String(50))
@@ -79,6 +81,7 @@ class InvoiceLineItem(Base):
     quality = Column(String(50))
     weight_gram = Column(Float)
     weight_tael = Column(Float)
+    weight_oz = Column(Float)
     unit_price = Column(Float)
     amount = Column(Float)
     sort_order = Column(Integer, default=0)
@@ -113,6 +116,7 @@ class InventoryMovement(Base):
     quality = Column(String(50))
     weight_gram = Column(Float, default=0)
     weight_tael = Column(Float, default=0)
+    weight_oz = Column(Float, default=0)
     movement_date = Column(Date, nullable=False)
     customer_name = Column(String(100))
     handler = Column(String(100))
@@ -135,6 +139,8 @@ def _migrate_db(engine):
             "created_by_user_id INTEGER",
             "voided_at DATETIME",
             "voided_by_user_id INTEGER",
+            "customer_phone VARCHAR(50)",
+            "invoice_currency VARCHAR(20)",
         ],
         "inventory_movements": [
             "source_location VARCHAR(50)",
@@ -144,6 +150,12 @@ def _migrate_db(engine):
         "cash_movements": [
             "currency VARCHAR(20)",
             "movement_kind VARCHAR(20)",
+        ],
+        "invoice_line_items": [
+            "weight_oz FLOAT",
+        ],
+        "inventory_movements": [
+            "weight_oz FLOAT",
         ],
     }
     inspector = inspect(engine)
@@ -174,8 +186,10 @@ def _migrate_db(engine):
 
 
 def init_db():
-    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(f"sqlite:///{DB_PATH}")
+    ensure_runtime_dirs()
+    # as_posix() keeps sqlite URLs portable on Linux (/path) and Windows (C:/path)
+    db_url = f"sqlite:///{Path(DB_PATH).resolve().as_posix()}"
+    engine = create_engine(db_url)
     Base.metadata.create_all(engine)
     _migrate_db(engine)
     db_session = sessionmaker(bind=engine)()
@@ -188,12 +202,14 @@ def save_invoice(session, invoice_data, line_items, movements, cash_movement=Non
         invoice_no=invoice_data["invoice_no"],
         transaction_type=invoice_data["transaction_type"],
         customer_name=invoice_data["customer_name"],
+        customer_phone=invoice_data.get("customer_phone", ""),
         transaction_date=invoice_data["transaction_date"],
         handler=invoice_data.get("handler", ""),
         payment_method=invoice_data.get("payment_method", ""),
         notes=invoice_data.get("notes", ""),
         note_amount=invoice_data.get("note_amount", 0),
         total_amount=invoice_data.get("total_amount") or 0,
+        invoice_currency=invoice_data.get("invoice_currency", "HKD$"),
         excel_path=invoice_data.get("excel_path", ""),
         source_location=invoice_data.get("source_location", ""),
         destination_location=invoice_data.get("destination_location", ""),
@@ -212,6 +228,7 @@ def save_invoice(session, invoice_data, line_items, movements, cash_movement=Non
                 quality=item.get("quality", ""),
                 weight_gram=item.get("weight_gram"),
                 weight_tael=item.get("weight_tael"),
+                weight_oz=item.get("weight_oz"),
                 unit_price=item.get("unit_price"),
                 amount=item.get("amount"),
                 sort_order=idx,
@@ -228,6 +245,7 @@ def save_invoice(session, invoice_data, line_items, movements, cash_movement=Non
                 quality=movement.get("quality", ""),
                 weight_gram=movement.get("weight_gram", 0) or 0,
                 weight_tael=movement.get("weight_tael", 0) or 0,
+                weight_oz=movement.get("weight_oz", 0) or 0,
                 movement_date=invoice_data["transaction_date"],
                 customer_name=invoice_data["customer_name"],
                 handler=invoice_data.get("handler", ""),

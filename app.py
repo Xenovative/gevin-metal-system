@@ -7,6 +7,9 @@ import json
 import os
 from datetime import date, datetime
 
+# Quiet Gradio analytics on headless Linux servers
+os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+
 import gradio as gr
 import pandas as pd
 
@@ -15,11 +18,14 @@ from config import (
     CASH_PAYMENT_METHOD,
     DEFAULT_CASH_CURRENCY,
     ITEM_TYPES,
+    OUTPUT_DIR,
     PAYMENT_METHODS,
     QUALITY_OPTIONS,
+    REPORT_DIR,
     STORAGE_LOCATION_CHOICES,
     TRANSACTION_TYPES,
     UNITS,
+    ensure_runtime_dirs,
 )
 from auth import (
     authenticate,
@@ -48,7 +54,7 @@ from inventory import (
     get_safe_totals,
     get_unassigned_metal_totals,
 )
-from invoice_generator import format_payment_method_display, generate_invoice_excel
+from invoice_generator import format_money, format_payment_method_display, generate_invoice_excel
 from invoice_number import get_next_invoice_number, validate_invoice_number
 from reports import daily_report, monthly_report, yearly_report
 
@@ -223,7 +229,7 @@ def _is_empty_number(value):
 
 
 def add_line_item(items_json, item_type, custom_item_type, quality, custom_quality,
-                  weight_gram, weight_tael, unit_price, amount, unit):
+                  weight_gram, weight_tael, weight_oz, unit_price, amount, unit):
     items = parse_line_items_json(items_json)
     resolved_item = _resolve_item_type(item_type, custom_item_type)
     resolved_quality = _resolve_quality(quality, custom_quality)
@@ -245,11 +251,18 @@ def add_line_item(items_json, item_type, custom_item_type, quality, custom_quali
         if tael < 0:
             return items_json, _items_to_table(items), "❌ 重量(両)不可為負數"
 
+    oz = None
+    if not _is_empty_number(weight_oz):
+        oz = float(weight_oz)
+        if oz < 0:
+            return items_json, _items_to_table(items), "❌ 重量(安士)不可為負數"
+
     items.append({
         "item_type": resolved_item,
         "quality": resolved_quality,
         "weight_gram": gram,
         "weight_tael": tael,
+        "weight_oz": oz,
         "unit_price": float(unit_price) if not _is_empty_number(unit_price) else None,
         "amount": float(amount) if not _is_empty_number(amount) else None,
         "unit": unit,
@@ -269,14 +282,17 @@ def clear_items():
 
 
 def _items_to_table(items):
+    columns = ["貨品", "成色", "重量(克)", "重量(両)", "重量(安士)", "單價", "金額"]
     if not items:
-        return pd.DataFrame(columns=["貨品", "成色", "重量(克)", "單價", "金額"])
+        return pd.DataFrame(columns=columns)
     rows = []
     for it in items:
         rows.append({
             "貨品": it.get("item_type", ""),
             "成色": it.get("quality", ""),
             "重量(克)": it.get("weight_gram", ""),
+            "重量(両)": "" if it.get("weight_tael") is None else it.get("weight_tael"),
+            "重量(安士)": "" if it.get("weight_oz") is None else it.get("weight_oz"),
             "單價": it.get("unit_price", ""),
             "金額": it.get("amount", ""),
         })
@@ -333,25 +349,33 @@ def _calculate_invoice_total(main_items, note_amount, has_amount):
     return total
 
 
-def build_payments_json(selected_methods, amounts, cash_currency=DEFAULT_CASH_CURRENCY):
+def build_payments_json(
+    selected_methods, amounts, cash_currency=DEFAULT_CASH_CURRENCY,
+    invoice_currency=None,
+):
+    invoice_currency = invoice_currency or DEFAULT_CASH_CURRENCY
     payments = []
     for method, amount in zip(PAYMENT_METHODS, amounts):
         if method in (selected_methods or []):
             entry = {
                 "method": method,
                 "amount": float(amount) if amount else 0,
+                "currency": (
+                    cash_currency or DEFAULT_CASH_CURRENCY
+                    if method == CASH_PAYMENT_METHOD
+                    else invoice_currency
+                ),
             }
-            if method == CASH_PAYMENT_METHOD:
-                entry["currency"] = cash_currency or DEFAULT_CASH_CURRENCY
             payments.append(entry)
     return json.dumps(payments, ensure_ascii=False)
 
 
-def validate_payments(selected_methods, amounts, total_amount, cash_currency):
+def validate_payments(selected_methods, amounts, total_amount, cash_currency, invoice_currency):
     if total_amount is None:
         return None
     if not selected_methods:
         return "請至少選擇一種付款方式"
+    invoice_currency = invoice_currency or DEFAULT_CASH_CURRENCY
     for method in selected_methods:
         idx = PAYMENT_METHODS.index(method)
         amount = amounts[idx]
@@ -362,7 +386,8 @@ def validate_payments(selected_methods, amounts, total_amount, cash_currency):
     payment_total = sum(float(amounts[PAYMENT_METHODS.index(m)]) for m in selected_methods)
     if total_amount and abs(payment_total - float(total_amount)) > 0.01:
         return (
-            f"付款金額合計 ({payment_total:,.2f}) 與發票合計 ({float(total_amount):,.2f}) 不符"
+            f"付款金額合計 ({format_money(payment_total, invoice_currency)}) "
+            f"與發票合計 ({format_money(total_amount, invoice_currency)}) 不符"
         )
     return None
 
@@ -371,7 +396,10 @@ def _reset_payment_fields():
     return (
         [gr.update(value=[])]
         + [gr.update(value=None) for _ in PAYMENT_METHODS]
-        + [gr.update(value=DEFAULT_CASH_CURRENCY, visible=False)]
+        + [
+            gr.update(value=DEFAULT_CASH_CURRENCY, visible=False),
+            gr.update(value=DEFAULT_CASH_CURRENCY),
+        ]
     )
 
 
@@ -401,10 +429,10 @@ def on_basic_info_change(tx_type, tx_date):
 
 
 def submit_invoice(
-    tx_type, invoice_no, customer_name, tx_date, handler,
+    tx_type, invoice_no, customer_name, customer_phone, tx_date, handler,
     selected_payment_methods,
     pay_amt_cash, pay_amt_transfer, pay_amt_cheque, pay_amt_other,
-    cash_currency,
+    cash_currency, invoice_currency,
     source_location, destination_location,
     notes, note_amount,
     main_items_json, exchange_items_json,
@@ -424,6 +452,8 @@ def submit_invoice(
     customer_name = (customer_name or "").strip()
     if not customer_name:
         return "❌ 請填寫客戶姓名", None, _items_to_table([])
+
+    customer_phone = (customer_phone or "").strip()
 
     if not source_location:
         return "❌ 請選擇倉存存取", None, _items_to_table([])
@@ -460,15 +490,18 @@ def submit_invoice(
 
     has_amount = tx_config.get("has_amount", True)
     total = _calculate_invoice_total(main_items, note_amount, has_amount)
+    invoice_currency = invoice_currency or DEFAULT_CASH_CURRENCY
 
     payment_error = validate_payments(
-        selected_payment_methods, payment_amounts, total, cash_currency,
+        selected_payment_methods, payment_amounts, total, cash_currency, invoice_currency,
     )
     if payment_error:
         return f"❌ {payment_error}", None, _items_to_table(main_items)
 
     payment_json = (
-        build_payments_json(selected_payment_methods, payment_amounts, cash_currency)
+        build_payments_json(
+            selected_payment_methods, payment_amounts, cash_currency, invoice_currency,
+        )
         if total is not None else ""
     )
 
@@ -476,9 +509,11 @@ def submit_invoice(
         "invoice_no": invoice_no.strip(),
         "transaction_type": tx_type,
         "customer_name": customer_name.strip(),
+        "customer_phone": customer_phone,
         "transaction_date": tx_date_parsed,
         "handler": handler or "",
         "payment_method": payment_json,
+        "invoice_currency": invoice_currency,
         "source_location": source_location,
         "destination_location": destination_location,
         "notes": notes or "",
@@ -508,8 +543,9 @@ def submit_invoice(
             f"✅ 發票已成功生成！\n"
             f"單號：{invoice_no}\n"
             f"客戶：{customer_name}\n"
-            f"倉存存取：{source_location} → 倉存位置：{destination_location}\n"
-            + (f"合計：{total:,.2f}\n" if total is not None else "")
+            + (f"電話：{customer_phone}\n" if customer_phone else "")
+            + f"倉存存取：{source_location} → 倉存位置：{destination_location}\n"
+            + (f"合計：{format_money(total, invoice_currency)}\n" if total is not None else "")
             + (
                 f"付款：{format_payment_method_display(payment_json)}\n"
                 if payment_json else ""
@@ -528,20 +564,20 @@ def submit_invoice(
 
 
 def submit_and_refresh(
-    tx_type, invoice_no, customer_name, tx_date, handler,
+    tx_type, invoice_no, customer_name, customer_phone, tx_date, handler,
     selected_payment_methods,
     pay_amt_cash, pay_amt_transfer, pay_amt_cheque, pay_amt_other,
-    cash_currency,
+    cash_currency, invoice_currency,
     source_location, destination_location,
     notes, note_amount,
     main_items_json, exchange_items_json,
     current_user,
 ):
     msg, excel_path, table = submit_invoice(
-        tx_type, invoice_no, customer_name, tx_date, handler,
+        tx_type, invoice_no, customer_name, customer_phone, tx_date, handler,
         selected_payment_methods,
         pay_amt_cash, pay_amt_transfer, pay_amt_cheque, pay_amt_other,
-        cash_currency,
+        cash_currency, invoice_currency,
         source_location, destination_location,
         notes, note_amount,
         main_items_json, exchange_items_json,
@@ -554,16 +590,16 @@ def submit_and_refresh(
         return (
             msg, excel_path, table,
             gr.update(value=next_no), banner,
-            "", "[]", empty, "[]", empty, "", None,
+            "", "", "[]", empty, "[]", empty, "", None,
             *_reset_payment_fields(),
         )
     return (
         msg, excel_path, table,
         gr.update(value=invoice_no), _invoice_no_banner(invoice_no or "", tx_type),
-        customer_name, main_items_json, table,
+        customer_name, customer_phone, main_items_json, table,
         exchange_items_json, _items_to_table(parse_line_items_json(exchange_items_json)),
         notes, note_amount,
-        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
     )
 
 
@@ -574,7 +610,7 @@ def start_new_invoice(tx_type, tx_date):
     return (
         gr.update(value=invoice_no),
         _invoice_no_banner(invoice_no, tx_type),
-        "", empty, "[]", empty, "[]", "", None, "",
+        "", "", empty, "[]", empty, "[]", "", None, "",
         *_reset_payment_fields(),
     )
 
@@ -642,6 +678,8 @@ def load_movements():
             "貨品": r.item_type,
             "成色": r.quality,
             "重量(克)": r.weight_gram,
+            "重量(両)": r.weight_tael,
+            "重量(安士)": getattr(r, "weight_oz", None) or "",
             "客戶": r.customer_name,
             "倉存存取": r.source_location or "",
             "倉存位置": r.destination_location or "",
@@ -728,6 +766,11 @@ def build_app():
                             info="由系統自動產生，無法手動修改。S=銷售 P=購入 T=兌料 D=交收",
                         )
                         customer_name = gr.Textbox(label="客戶姓名 *", placeholder="例：陳太")
+                        customer_phone = gr.Textbox(
+                            label="客戶電話",
+                            placeholder="例：9123 4567",
+                            info="選填；會顯示於公司單客戶姓名右側",
+                        )
                     tx_desc = gr.Markdown("")
                     with gr.Row():
                         tx_date = gr.DateTime(
@@ -742,6 +785,12 @@ def build_app():
                         )
                     payment_section = gr.Column()
                     with payment_section:
+                        invoice_currency = gr.Dropdown(
+                            choices=CASH_CURRENCIES,
+                            label="發票貨幣（金額及合計）",
+                            value=DEFAULT_CASH_CURRENCY,
+                            info="貨品金額、備註金額、合計及非現金付款將使用此貨幣",
+                        )
                         payment_methods = gr.CheckboxGroup(
                             choices=PAYMENT_METHODS,
                             label="付款方式（可複選）",
@@ -778,6 +827,7 @@ def build_app():
                         quality = gr.Dropdown(choices=QUALITY_OPTIONS, label="成色")
                         weight_gram = gr.Number(label="重量(克) *", precision=3, value=0)
                         weight_tael = gr.Number(label="重量(両)", precision=3, value=0)
+                        weight_oz = gr.Number(label="重量(安士 oz)", precision=3, value=0)
                     with gr.Row():
                         custom_item_type = gr.Textbox(
                             label="其他貨品名稱",
@@ -813,6 +863,7 @@ def build_app():
                             ex_quality = gr.Dropdown(choices=QUALITY_OPTIONS, label="對換成色")
                             ex_weight_gram = gr.Number(label="對換重量(克) *", precision=3, value=0)
                             ex_weight_tael = gr.Number(label="對換重量(両)", precision=3, value=0)
+                            ex_weight_oz = gr.Number(label="對換重量(安士 oz)", precision=3, value=0)
                         with gr.Row():
                             ex_custom_item_type = gr.Textbox(
                                 label="其他對換貨品名稱",
@@ -874,7 +925,7 @@ def build_app():
                     btn_add.click(
                         add_line_item,
                         [main_items_json, item_type, custom_item_type, quality, custom_quality,
-                         weight_gram, weight_tael, unit_price, amount, unit],
+                         weight_gram, weight_tael, weight_oz, unit_price, amount, unit],
                         [main_items_json, main_items_table, item_add_status],
                     )
                     btn_remove.click(remove_last_item, main_items_json, [main_items_json, main_items_table])
@@ -883,38 +934,38 @@ def build_app():
                     btn_ex_add.click(
                         add_line_item,
                         [exchange_items_json, ex_item_type, ex_custom_item_type, ex_quality, ex_custom_quality,
-                         ex_weight_gram, ex_weight_tael, ex_unit_price, ex_amount, unit],
+                         ex_weight_gram, ex_weight_tael, ex_weight_oz, ex_unit_price, ex_amount, unit],
                         [exchange_items_json, exchange_items_table, ex_item_add_status],
                     )
                     btn_ex_clear.click(clear_items, outputs=[exchange_items_json, exchange_items_table])
 
                     submit_btn.click(
                         submit_and_refresh,
-                        [tx_type, invoice_no, customer_name, tx_date, handler,
+                        [tx_type, invoice_no, customer_name, customer_phone, tx_date, handler,
                          payment_methods, pay_amt_cash, pay_amt_transfer, pay_amt_cheque, pay_amt_other,
-                         cash_currency,
+                         cash_currency, invoice_currency,
                          source_location, destination_location,
                          notes, note_amount,
                          main_items_json, exchange_items_json, current_user],
                         [
                             result_msg, excel_download, main_items_table,
                             invoice_no, invoice_no_banner,
-                            customer_name, main_items_json, main_items_table,
+                            customer_name, customer_phone, main_items_json, main_items_table,
                             exchange_items_json, exchange_items_table,
                             notes, note_amount,
                             payment_methods, pay_amt_cash, pay_amt_transfer, pay_amt_cheque, pay_amt_other,
-                            cash_currency,
+                            cash_currency, invoice_currency,
                         ],
                     )
                     new_invoice_btn.click(
                         start_new_invoice, [tx_type, tx_date],
                         [
                             invoice_no, invoice_no_banner,
-                            customer_name, main_items_table, main_items_json,
+                            customer_name, customer_phone, main_items_table, main_items_json,
                             exchange_items_table, exchange_items_json,
                             notes, note_amount, result_msg,
                             payment_methods, pay_amt_cash, pay_amt_transfer, pay_amt_cheque, pay_amt_other,
-                            cash_currency,
+                            cash_currency, invoice_currency,
                         ],
                     )
                     payment_methods.change(
@@ -1050,6 +1101,21 @@ def build_app():
 
 
 if __name__ == "__main__":
+    ensure_runtime_dirs()
     app = build_app()
     port = int(os.environ.get("PORT", "7861"))
-    app.launch(server_name="0.0.0.0", server_port=port, share=False)
+    # Bind all interfaces so the app is reachable on Linux VPS / LAN
+    launch_kwargs = {
+        "server_name": "0.0.0.0",
+        "server_port": port,
+        "share": False,
+        "allowed_paths": [str(OUTPUT_DIR), str(REPORT_DIR)],
+        "show_error": True,
+    }
+    try:
+        app.launch(**launch_kwargs)
+    except TypeError:
+        # Older Gradio without allowed_paths / show_error
+        launch_kwargs.pop("allowed_paths", None)
+        launch_kwargs.pop("show_error", None)
+        app.launch(**launch_kwargs)

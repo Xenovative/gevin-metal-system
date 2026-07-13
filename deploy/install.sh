@@ -37,8 +37,12 @@ sudo -u "$APP_USER" python3 -m venv .venv
 sudo -u "$APP_USER" .venv/bin/pip install --upgrade pip
 sudo -u "$APP_USER" .venv/bin/pip install -r requirements.txt
 
+echo "==> Cleaning macOS leftover files (if any)..."
+find "$APP_DIR" -name '._*' -not -path '*/.git/*' -delete 2>/dev/null || true
+find "$APP_DIR" -name '.DS_Store' -not -path '*/.git/*' -delete 2>/dev/null || true
+
 echo "==> Creating data/output directories..."
-sudo -u "$APP_USER" mkdir -p data output/invoices output/reports
+sudo -u "$APP_USER" mkdir -p data output/invoices output/reports logs
 
 echo "==> Installing systemd service..."
 cp deploy/gevin-metal.service /etc/systemd/system/gevin-metal.service

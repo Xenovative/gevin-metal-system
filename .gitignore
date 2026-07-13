@@ -3,6 +3,9 @@
 __pycache__/
 *.pyc
 ._*
+.DS_Store
+.cursor/
 data/
 output/
-.DS_Store
+logs/
+*.log

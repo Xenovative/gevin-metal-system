@@ -6,7 +6,7 @@ from sqlalchemy import and_
 
 from config import REPORT_DIR
 from database import CashMovement, InventoryMovement, Invoice
-from invoice_generator import format_payment_method_display
+from invoice_generator import format_money, format_payment_method_display
 from cash import extract_cash_amount, extract_cash_currency, get_cash_balances
 
 
@@ -61,6 +61,8 @@ def generate_inventory_report(session, start_date, end_date, period_label):
             "貨品": m.item_type,
             "成色": m.quality,
             "重量(克)": m.weight_gram,
+            "重量(両)": m.weight_tael,
+            "重量(安士)": getattr(m, "weight_oz", None) or "",
             "倉存存取": m.source_location or "",
             "倉存位置": m.destination_location or "",
             "客戶": m.customer_name or "",
@@ -205,7 +207,13 @@ def generate_invoice_report(session, start_date, end_date, period_label):
             "狀態": "已作廢" if inv.status == "voided" else "正常",
             "交易性質": inv.transaction_type,
             "客戶": inv.customer_name,
+            "客戶電話": inv.customer_phone or "",
             "金額": inv.total_amount,
+            "貨幣": getattr(inv, "invoice_currency", None) or "HKD$",
+            "金額(含貨幣)": format_money(
+                inv.total_amount,
+                getattr(inv, "invoice_currency", None) or "HKD$",
+            ),
             "現金金額": extract_cash_amount(inv.payment_method or ""),
             "現金貨幣": extract_cash_currency(inv.payment_method or ""),
             "倉存存取": inv.source_location or "",

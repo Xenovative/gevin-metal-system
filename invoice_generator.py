@@ -5,7 +5,7 @@ from pathlib import Path
 
 import openpyxl
 
-from config import GRAMS_PER_TAEL, OUTPUT_DIR, TEMPLATE_PATH, TRANSACTION_TYPES
+from config import DEFAULT_CASH_CURRENCY, GRAMS_PER_TAEL, OUTPUT_DIR, TEMPLATE_PATH, TRANSACTION_TYPES
 
 # 客戶單（上半部）與公司單（下半部）列號對照
 CUSTOMER_COPY = {
@@ -17,6 +17,9 @@ CUSTOMER_COPY = {
     "payment_row": 25,
 }
 COMPANY_COPY_OFFSET = 27  # 公司單 = 客戶單列號 + 27
+PAYMENT_LINE_ROWS = 4
+PRINTINGS_CHECKED_LABEL = "已檢查列印內容及背面條款 PRINTINGS CHECKED [ ]"
+GOOD_CHECKED_LABEL = "已檢查貨品 GOOD CHECKED [ ]"
 
 
 def _format_number(value):
@@ -29,33 +32,63 @@ def _format_number(value):
     return value
 
 
-def format_payment_method_display(payment_method):
-    """將付款資料（JSON 或舊版純文字）轉為可讀字串。"""
+def _parse_payment_entries(payment_method):
     if not payment_method:
-        return ""
+        return []
     try:
         payments = json.loads(payment_method)
     except (json.JSONDecodeError, TypeError):
-        return str(payment_method)
+        return [{"method": str(payment_method), "amount": None}]
     if not isinstance(payments, list):
-        return str(payment_method)
-    parts = []
-    for entry in payments:
-        method = entry.get("method", "")
-        amount = entry.get("amount")
-        currency = entry.get("currency", "")
-        if method and amount is not None:
-            label = f"{method} {currency} {float(amount):,.2f}".strip() if currency else f"{method} {float(amount):,.2f}"
-            parts.append(label)
-        elif method:
-            parts.append(method)
-    return " / ".join(parts)
+        return [{"method": str(payment_method), "amount": None}]
+    return payments
 
 
-def _format_amount(value):
+def _format_payment_amount(amount, currency=None):
+    return format_money(amount, currency)
+
+
+def format_money(value, currency=None):
+    """Format numeric amount with currency label, e.g. HKD$ 1,234.56."""
     if value is None or value == "":
         return None
-    return f"{float(value):,.2f}"
+    currency = currency or DEFAULT_CASH_CURRENCY
+    num = float(value)
+    if num == int(num):
+        return f"{currency} {int(num):,}"
+    return f"{currency} {num:,.2f}"
+
+
+def format_payment_excel_lines(payment_method):
+    """每種付款方式一行，供 Excel 垂直列出。"""
+    lines = []
+    for entry in _parse_payment_entries(payment_method):
+        method = entry.get("method", "")
+        amount = entry.get("amount")
+        currency = entry.get("currency") or DEFAULT_CASH_CURRENCY
+        if method and amount is not None:
+            lines.append(f"{method} {_format_payment_amount(amount, currency)}")
+        elif method:
+            lines.append(method)
+    return lines
+
+
+def format_payment_method_display(payment_method):
+    """將付款資料（JSON 或舊版純文字）轉為可讀字串。"""
+    lines = format_payment_excel_lines(payment_method)
+    if lines:
+        return " / ".join(lines)
+    if not payment_method:
+        return ""
+    try:
+        json.loads(payment_method)
+        return ""
+    except (json.JSONDecodeError, TypeError):
+        return str(payment_method)
+
+
+def _format_amount(value, currency=None):
+    return format_money(value, currency)
 
 
 EXCHANGE_LABEL = "對換  (Exchange) "
@@ -75,8 +108,10 @@ def _notes_col(layout, customer_notes_col):
 def _write_item_block(
     ws, start_row, items, has_amount=True,
     write_stock=False, source=None, destination=None,
+    currency=None,
 ):
-    """Write line items starting at start_row. Each item uses 2 rows (gram + tael)."""
+    """Write line items starting at start_row. Each item uses 2+ rows (gram + optional tael/oz)."""
+    currency = currency or DEFAULT_CASH_CURRENCY
     row = start_row
     for item in items:
         ws.cell(row=row, column=3).value = item.get("item_type", "")
@@ -84,9 +119,9 @@ def _write_item_block(
         ws.cell(row=row, column=6).value = _format_number(item.get("weight_gram"))
         ws.cell(row=row, column=7).value = "克 Gram "
         if item.get("unit_price") is not None:
-            ws.cell(row=row, column=9).value = _format_number(item.get("unit_price"))
+            ws.cell(row=row, column=9).value = format_money(item.get("unit_price"), currency)
         if item.get("amount") is not None:
-            ws.cell(row=row, column=10).value = _format_amount(item.get("amount"))
+            ws.cell(row=row, column=10).value = _format_amount(item.get("amount"), currency)
         if write_stock and source:
             ws.cell(row=row, column=8).value = f"倉存存取 {source}"
 
@@ -99,6 +134,10 @@ def _write_item_block(
             if write_stock and destination:
                 ws.cell(row=row, column=8).value = f"倉存位置 {destination}"
         row += 1
+        if item.get("weight_oz") is not None:
+            ws.cell(row=row, column=6).value = _format_number(item.get("weight_oz"))
+            ws.cell(row=row, column=7).value = "安士 oz"
+            row += 1
     return row
 
 
@@ -142,7 +181,27 @@ def _clear_section_data(ws, layout):
         ws.cell(row=other_row, column=c).value = None
 
     ws.cell(row=layout["total_row"], column=10).value = None
-    ws.cell(row=layout["payment_row"], column=6).value = None
+    payment_row = layout["payment_row"]
+    for offset in range(PAYMENT_LINE_ROWS):
+        row = payment_row + offset
+        ws.cell(row=row, column=3).value = None
+        ws.cell(row=row, column=5).value = None
+    ws.cell(row=payment_row, column=6).value = None
+
+
+def _write_payment_section(ws, layout, invoice_data):
+    """付款方式垂直列出；右側加入核取方塊。"""
+    payment_row = layout["payment_row"]
+    lines = format_payment_excel_lines(invoice_data.get("payment_method", ""))
+    for idx, line in enumerate(lines[:PAYMENT_LINE_ROWS]):
+        ws.cell(row=payment_row + idx, column=3).value = line
+
+    ws.cell(row=payment_row, column=5).value = PRINTINGS_CHECKED_LABEL
+    ws.cell(row=payment_row + 1, column=5).value = GOOD_CHECKED_LABEL
+
+    handler = invoice_data.get("handler", "")
+    if handler:
+        ws.cell(row=payment_row, column=6).value = handler
 
 
 def _fill_copy_section(
@@ -161,6 +220,9 @@ def _fill_copy_section(
     _clear_section_data(ws, layout)
 
     is_company = _is_company_copy(layout)
+    if is_company:
+        phone = (invoice_data.get("customer_phone") or "").strip()
+        ws.cell(row=layout["info_row"], column=7).value = phone or None
     stock_kwargs = {
         "write_stock": is_company,
         "source": invoice_data.get("source_location") if is_company else None,
@@ -168,7 +230,8 @@ def _fill_copy_section(
     }
 
     next_row = _write_item_block(
-        ws, layout["items_start"], main_items, has_amount=has_amount, **stock_kwargs,
+        ws, layout["items_start"], main_items, has_amount=has_amount,
+        currency=invoice_data.get("invoice_currency"), **stock_kwargs,
     )
 
     if exchange_items and has_exchange:
@@ -179,7 +242,8 @@ def _fill_copy_section(
             label_row = min(next_row, layout["notes_row"] - 3)
             ws.cell(row=label_row, column=3).value = EXCHANGE_LABEL
         _write_item_block(
-            ws, label_row + 1, exchange_items, has_amount=has_amount, **stock_kwargs,
+            ws, label_row + 1, exchange_items, has_amount=has_amount,
+            currency=invoice_data.get("invoice_currency"), **stock_kwargs,
         )
 
     notes = invoice_data.get("notes", "")
@@ -189,18 +253,15 @@ def _fill_copy_section(
         ws.cell(row=notes_row, column=_notes_col(layout, customer_notes_col)).value = notes
 
     note_amount = invoice_data.get("note_amount")
+    currency = invoice_data.get("invoice_currency") or DEFAULT_CASH_CURRENCY
     if note_amount:
-        ws.cell(row=notes_row, column=10).value = _format_amount(note_amount)
+        ws.cell(row=notes_row, column=10).value = _format_amount(note_amount, currency)
 
     total = invoice_data.get("total_amount")
     if total is not None:
-        ws.cell(row=layout["total_row"], column=10).value = _format_amount(total)
+        ws.cell(row=layout["total_row"], column=10).value = _format_amount(total, currency)
 
-    payment = format_payment_method_display(invoice_data.get("payment_method", ""))
-    if payment:
-        ws.cell(row=layout["payment_row"], column=3).value = payment
-    handler = invoice_data.get("handler", "")
-    ws.cell(row=layout["payment_row"], column=6).value = handler or ""
+    _write_payment_section(ws, layout, invoice_data)
 
 
 def _company_layout():
