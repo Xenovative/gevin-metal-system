@@ -12,7 +12,7 @@ find "$ROOT_DIR" -name '.DS_Store' -not -path '*/.git/*' -delete 2>/dev/null || 
 echo "==> Installing Ubuntu/Debian system packages..."
 if command -v apt-get >/dev/null 2>&1; then
   sudo apt-get update
-  sudo apt-get install -y python3 python3-venv python3-pip
+  sudo apt-get install -y git python3 python3-venv python3-pip
 else
   echo "WARNING: apt-get not found. Ensure python3 + venv + pip are installed." >&2
 fi
@@ -42,7 +42,4 @@ chmod +x scripts/install-ubuntu.sh scripts/run.sh 2>/dev/null || true
 echo ""
 echo "Install complete."
 echo "Start the app with:"
-echo "  cd $ROOT_DIR && ./scripts/run.sh"
-echo ""
-echo "Or one-liner:"
 echo "  cd $ROOT_DIR && bash scripts/run.sh"

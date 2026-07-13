@@ -24,7 +24,6 @@ fi
 PORT="${PORT:-7861}"
 export PORT
 export GRADIO_ANALYTICS_ENABLED="${GRADIO_ANALYTICS_ENABLED:-False}"
-# Headless / server-friendly defaults
 export PYTHONUNBUFFERED=1
 
 echo "Starting gevin-metal-system on http://0.0.0.0:${PORT}"

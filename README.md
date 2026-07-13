@@ -21,36 +21,30 @@
 ### 報表
 - 每日 / 每月 / 每年倉存報表與發票報表（Excel）
 
-## Linux 一鍵啟動（建議）
+## Linux 一鍵部署（Ubuntu / Debian）
 
-在專案目錄執行（Ubuntu / Debian / 其他有 `python3` 的 Linux）：
+```bash
+sudo apt-get update && sudo apt-get install -y git && git clone https://github.com/Xenovative/gevin-metal-system.git && cd gevin-metal-system && bash scripts/install-ubuntu.sh && bash scripts/run.sh
+```
+
+若專案已在本機：
 
 ```bash
 bash scripts/run.sh
 ```
 
-第一次執行會自動建立 `.venv` 並安裝依賴；之後同一指令即可啟動。預設埠 **7861**。
+第一次會自動建立 `.venv` 並安裝依賴。預設埠 **7861**。
 
-若系統尚未安裝 `python3-venv`（常見於全新 Ubuntu），先跑一次：
+瀏覽器：`http://127.0.0.1:7861` 或 `http://<伺服器IP>:7861`
 
-```bash
-bash scripts/install-ubuntu.sh && bash scripts/run.sh
-```
-
-瀏覽器開啟：`http://127.0.0.1:7861`（遠端伺服器則用 `http://<伺服器IP>:7861`）
-
-自訂埠號：
-
-```bash
-PORT=8080 bash scripts/run.sh
-```
+自訂埠：`PORT=8080 bash scripts/run.sh`
 
 ### 預設登入
 
 - 帳號：`admin`
 - 密碼：`admin123`
 
-## 手動安裝（不用腳本）
+## 手動安裝
 
 ```bash
 sudo apt-get update && sudo apt-get install -y python3 python3-venv python3-pip
@@ -69,8 +63,6 @@ PORT=7861 .venv/bin/python app.py
 cd /var/www/gevin-metal-system && bash deploy/install.sh
 ```
 
-systemd 範例：`deploy/gevin-metal.service`（安裝腳本會自動替換路徑佔位符）。
-
 ## 環境變數
 
 | 變數 | 預設 | 說明 |
@@ -82,34 +74,21 @@ systemd 範例：`deploy/gevin-metal.service`（安裝腳本會自動替換路�
 
 ```
 gevin-metal-system/
-├── app.py                  # Gradio 主程式
-├── config.py               # 交易類型與選項設定
-├── database.py             # SQLite 資料庫
-├── invoice_generator.py    # Excel 發票生成
-├── inventory.py            # 倉存邏輯
-├── reports.py              # 報表生成
+├── app.py
+├── config.py
+├── database.py
 ├── scripts/
-│   ├── install-ubuntu.sh   # Ubuntu 系統套件 + venv 安裝
-│   └── run.sh              # Linux 啟動（可自動建 venv）
+│   ├── install-ubuntu.sh
+│   └── run.sh
 ├── deploy/
-│   ├── install.sh          # VPS 一鍵安裝
-│   └── gevin-metal.service # systemd 範例
+│   ├── install.sh
+│   └── gevin-metal.service
 ├── templates/
 │   └── invoice_template.xlsx
 ├── output/
-│   ├── invoices/           # 生成的發票
-│   └── reports/            # 生成的報表
 └── data/
-    └── gevin.db            # 資料庫檔案
 ```
 
 ## 相依套件
 
-見 `requirements.txt`：
-
-- gradio
-- openpyxl
-- sqlalchemy
-- pandas
-
-皆為跨平台 PyPI 套件，無 macOS / Windows 專用依賴。請使用 Linux 上的 `.venv`（勿複製其他系統的虛擬環境）。
+見 `requirements.txt`（gradio / openpyxl / sqlalchemy / pandas）。請在 Linux 上建立新的 `.venv`，勿複製其他系統的虛擬環境。
