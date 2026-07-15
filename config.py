@@ -91,7 +91,7 @@ SAFE_SUMMARY_CATEGORIES = ["金", "純銀"]
 # inventory_direction: in=入倉 / out=出倉 / exchange=兌換（來料入、對換出）
 TRANSACTION_TYPES = {
     "銷售": {
-        "sheet": "銷售(保護)",
+        "sheet": "銷售",
         "prefix": "S",
         "number_label": "Invoice No.",
         "inventory_direction": "out",
@@ -101,7 +101,7 @@ TRANSACTION_TYPES = {
         "description": "銷售金屬給客戶，金屬出倉",
     },
     "購入": {
-        "sheet": "購入單(保護)",
+        "sheet": "購入單",
         "prefix": "P",
         "number_label": "Invoice No.",
         "inventory_direction": "in",
@@ -111,7 +111,7 @@ TRANSACTION_TYPES = {
         "description": "向供應商購入金屬，金屬入倉",
     },
     "兌料": {
-        "sheet": "兌料單(保護)",
+        "sheet": "兌料單",
         "prefix": "T",
         "number_label": "Invoice No.",
         "inventory_direction": "exchange",
@@ -121,7 +121,7 @@ TRANSACTION_TYPES = {
         "description": "客戶來料兌換新貨，需填寫「對換貨品」",
     },
     "交收去料": {
-        "sheet": "交收單(保護)去料",
+        "sheet": "交收單",
         "prefix": "D",
         "number_label": "編號 No.",
         "inventory_direction": "out",

@@ -95,19 +95,32 @@ def _tab_visibility_for_user(user):
 
 
 def do_login(username, password):
-    user = authenticate(session, username, password)
-    if not user:
+    fail = (
+        None,
+        "❌ 帳號或密碼錯誤",
+        gr.update(visible=True),
+        gr.update(visible=False),
+        _handler_field_update(None),
+        *_tab_visibility_for_user(None),
+        "",
+    )
+    try:
+        user = authenticate(session, username, password)
+        if not user:
+            return fail
+        log_audit(session, user, "login")
+        session.commit()
+    except Exception as exc:
+        session.rollback()
         return (
             None,
-            "❌ 帳號或密碼錯誤",
+            f"❌ 登入失敗：{exc}",
             gr.update(visible=True),
             gr.update(visible=False),
             _handler_field_update(None),
             *_tab_visibility_for_user(None),
             "",
         )
-    log_audit(session, user, "login")
-    session.commit()
     role_label = "Admin" if is_admin(user) else "員工"
     return (
         user,
@@ -724,7 +737,7 @@ def build_app():
     empty_items = "[]"
     empty_table = _items_to_table([])
 
-    with gr.Blocks(title="貴金屬加工廠 — 發票與倉存系統", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="貴金屬加工廠 — 發票與倉存系統") as demo:
         current_user = gr.State(None)
 
         gr.Markdown("# 貴金屬加工廠 — 發票與倉存系統")
@@ -1104,18 +1117,23 @@ if __name__ == "__main__":
     ensure_runtime_dirs()
     app = build_app()
     port = int(os.environ.get("PORT", "7861"))
-    # Bind all interfaces so the app is reachable on Linux VPS / LAN
+    # Bind all interfaces so LAN devices (iPad/phone/PC) can reach the Linux server.
+    # strict_cors=False is required for access via http://<lan-ip>:port (not only localhost).
+    # ssr_mode=False avoids Gradio Node SSR binding only to 127.0.0.1 on some hosts.
     launch_kwargs = {
         "server_name": "0.0.0.0",
         "server_port": port,
         "share": False,
         "allowed_paths": [str(OUTPUT_DIR), str(REPORT_DIR)],
         "show_error": True,
+        "strict_cors": False,
+        "ssr_mode": False,
+        "theme": gr.themes.Soft(),
     }
     try:
         app.launch(**launch_kwargs)
     except TypeError:
-        # Older Gradio without allowed_paths / show_error
-        launch_kwargs.pop("allowed_paths", None)
-        launch_kwargs.pop("show_error", None)
+        # Older Gradio without newer launch kwargs
+        for key in ("allowed_paths", "show_error", "strict_cors", "ssr_mode", "theme"):
+            launch_kwargs.pop(key, None)
         app.launch(**launch_kwargs)

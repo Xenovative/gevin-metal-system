@@ -4,22 +4,26 @@ from datetime import date, datetime
 from pathlib import Path
 
 import openpyxl
+from openpyxl.worksheet.page import PageMargins
+from openpyxl.worksheet.properties import PageSetupProperties
 
 from config import DEFAULT_CASH_CURRENCY, GRAMS_PER_TAEL, OUTPUT_DIR, TEMPLATE_PATH, TRANSACTION_TYPES
 
 # 客戶單（上半部）與公司單（下半部）列號對照
+# Row heights in templates/invoice_template.xlsx leave top/mid spacers so
+# printed data sits in the blank frames of the A4 pre-printed 收據 form
+# (branding/logo at top of each half must not be overwritten).
 CUSTOMER_COPY = {
-    "invoice_no_row": 5,
+    "invoice_no_row": 4,
     "info_row": 6,
     "items_start": 11,
     "notes_row": 19,
     "total_row": 22,
-    "payment_row": 25,
+    "payment_row": 23,
 }
 COMPANY_COPY_OFFSET = 27  # 公司單 = 客戶單列號 + 27
 PAYMENT_LINE_ROWS = 4
-PRINTINGS_CHECKED_LABEL = "已檢查列印內容及背面條款 PRINTINGS CHECKED [ ]"
-GOOD_CHECKED_LABEL = "已檢查貨品 GOOD CHECKED [ ]"
+PRINT_AREA = "A1:K54"
 
 
 def _format_number(value):
@@ -121,7 +125,8 @@ def _write_item_block(
         if item.get("unit_price") is not None:
             ws.cell(row=row, column=9).value = format_money(item.get("unit_price"), currency)
         if item.get("amount") is not None:
-            ws.cell(row=row, column=10).value = _format_amount(item.get("amount"), currency)
+            # Column K aligns with the narrow amount box on the A4 receipt form
+            ws.cell(row=row, column=11).value = _format_amount(item.get("amount"), currency)
         if write_stock and source:
             ws.cell(row=row, column=8).value = f"倉存存取 {source}"
 
@@ -156,10 +161,10 @@ def _is_exchange_label_row(ws, row):
 def _clear_item_rows(ws, start_row, end_row, clear_stock=False):
     for r in range(start_row, end_row):
         if _is_exchange_label_row(ws, r):
-            for c in range(4, 11):
+            for c in range(4, 12):
                 ws.cell(row=r, column=c).value = None
             continue
-        for c in range(3, 11):
+        for c in range(3, 12):
             if c == 8 and not clear_stock:
                 continue
             ws.cell(row=r, column=c).value = None
@@ -173,31 +178,29 @@ def _clear_section_data(ws, layout):
     )
 
     notes_row = layout["notes_row"]
-    for c in (4, 5, 10):
+    for c in (4, 5, 10, 11):
         ws.cell(row=notes_row, column=c).value = None
     # 清除「其他」備註列（含金額欄）
     other_row = notes_row + 1
-    for c in (4, 5, 10):
+    for c in (4, 5, 10, 11):
         ws.cell(row=other_row, column=c).value = None
 
     ws.cell(row=layout["total_row"], column=10).value = None
+    ws.cell(row=layout["total_row"], column=11).value = None
     payment_row = layout["payment_row"]
     for offset in range(PAYMENT_LINE_ROWS):
         row = payment_row + offset
         ws.cell(row=row, column=3).value = None
-        ws.cell(row=row, column=5).value = None
+        # Do not clear column 5 — template already has print/goods checkboxes there
     ws.cell(row=payment_row, column=6).value = None
 
 
 def _write_payment_section(ws, layout, invoice_data):
-    """付款方式垂直列出；右側加入核取方塊。"""
+    """付款方式垂直列出；核取方塊已在 Excel 範本中，不再寫入文字。"""
     payment_row = layout["payment_row"]
     lines = format_payment_excel_lines(invoice_data.get("payment_method", ""))
     for idx, line in enumerate(lines[:PAYMENT_LINE_ROWS]):
         ws.cell(row=payment_row + idx, column=3).value = line
-
-    ws.cell(row=payment_row, column=5).value = PRINTINGS_CHECKED_LABEL
-    ws.cell(row=payment_row + 1, column=5).value = GOOD_CHECKED_LABEL
 
     handler = invoice_data.get("handler", "")
     if handler:
@@ -211,11 +214,14 @@ def _fill_copy_section(
     has_amount = tx_config.get("has_amount", True)
     has_exchange = tx_config.get("has_exchange", False)
 
-    ws.cell(row=layout["invoice_no_row"], column=10).value = (
-        f"{number_label}{invoice_data['invoice_no']}"
+    # Col K matches invoice no / date / amount boxes on the pre-printed form
+    ws.cell(row=layout["invoice_no_row"], column=11).value = (
+        f"{number_label} {invoice_data['invoice_no']}"
+        if not str(number_label).endswith(" ")
+        else f"{number_label}{invoice_data['invoice_no']}"
     )
-    ws.cell(row=layout["info_row"], column=6).value = invoice_data["customer_name"]
-    ws.cell(row=layout["info_row"], column=10).value = tx_date
+    ws.cell(row=layout["info_row"], column=5).value = invoice_data["customer_name"]
+    ws.cell(row=layout["info_row"], column=11).value = tx_date
 
     _clear_section_data(ws, layout)
 
@@ -255,11 +261,11 @@ def _fill_copy_section(
     note_amount = invoice_data.get("note_amount")
     currency = invoice_data.get("invoice_currency") or DEFAULT_CASH_CURRENCY
     if note_amount:
-        ws.cell(row=notes_row, column=10).value = _format_amount(note_amount, currency)
+        ws.cell(row=notes_row, column=11).value = _format_amount(note_amount, currency)
 
     total = invoice_data.get("total_amount")
     if total is not None:
-        ws.cell(row=layout["total_row"], column=10).value = _format_amount(total, currency)
+        ws.cell(row=layout["total_row"], column=11).value = _format_amount(total, currency)
 
     _write_payment_section(ws, layout, invoice_data)
 
@@ -268,11 +274,53 @@ def _company_layout():
     return {key: val + COMPANY_COPY_OFFSET for key, val in CUSTOMER_COPY.items()}
 
 
+def _apply_a4_print_layout(ws):
+    """Force A4 single-page print so Excel data aligns with pre-printed branding."""
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.orientation = "portrait"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 1
+    if ws.sheet_properties.pageSetUpPr is None:
+        ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    else:
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins = PageMargins(
+        left=0.15, right=0.15, top=0.2, bottom=0.2, header=0.0, footer=0.0
+    )
+    ws.print_area = PRINT_AREA
+
+    # Do not print Excel titles over pre-printed 收據 / logo band
+    for row in (3, 30):
+        for col in (9, 10, 11):
+            cell = ws.cell(row=row, column=col)
+            if not cell.value:
+                continue
+            text = str(cell.value)
+            if "Invoice No" in text or "編號" in text:
+                continue
+            if any(
+                key in text
+                for key in (
+                    "Sales Invoice",
+                    "Purchase Invoice",
+                    "銷售單",
+                    "購入單",
+                    "兌料",
+                    "交收",
+                    "收據",
+                    "RECEIPT",
+                )
+            ):
+                cell.value = None
+
+
 def generate_invoice_excel(invoice_data, main_items, exchange_items=None):
     """
     Generate Excel invoice from template.
 
     Fills both 客戶單 (top) and 公司單 (bottom, rows ~29-54) sections.
+    Layout is tuned so values fall inside the blank frames of the A4
+    pre-printed company receipt paper (no overlap with logo/branding).
     """
     tx_type = invoice_data["transaction_type"]
     tx_config = TRANSACTION_TYPES[tx_type]
@@ -284,7 +332,9 @@ def generate_invoice_excel(invoice_data, main_items, exchange_items=None):
 
     wb = openpyxl.load_workbook(output_path)
     if sheet_name not in wb.sheetnames:
-        raise ValueError(f"範本中找不到分頁：{sheet_name}")
+        raise ValueError(
+            f"範本中找不到分頁：{sheet_name}（現有：{', '.join(wb.sheetnames)}）"
+        )
 
     ws = wb[sheet_name]
     tx_date = invoice_data["transaction_date"]
@@ -303,6 +353,7 @@ def generate_invoice_excel(invoice_data, main_items, exchange_items=None):
         ws, _company_layout(), invoice_data, main_items, exchange_items,
         tx_config, number_label, tx_date,
     )
+    _apply_a4_print_layout(ws)
 
     # 只保留本次交易對應的分頁
     for name in list(wb.sheetnames):

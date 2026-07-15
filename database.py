@@ -12,7 +12,7 @@ from sqlalchemy import (
     Text,
     create_engine,
 )
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import declarative_base, scoped_session, sessionmaker
 
 from auth import ensure_default_admin
 from config import DB_PATH, INVOICE_STATUS_ACTIVE, ensure_runtime_dirs
@@ -189,12 +189,18 @@ def init_db():
     ensure_runtime_dirs()
     # as_posix() keeps sqlite URLs portable on Linux (/path) and Windows (C:/path)
     db_url = f"sqlite:///{Path(DB_PATH).resolve().as_posix()}"
-    engine = create_engine(db_url)
+    # check_same_thread=False: Gradio handles requests on multiple threads / devices
+    engine = create_engine(
+        db_url,
+        connect_args={"check_same_thread": False},
+        pool_pre_ping=True,
+    )
     Base.metadata.create_all(engine)
     _migrate_db(engine)
-    db_session = sessionmaker(bind=engine)()
-    ensure_default_admin(db_session)
-    return db_session
+    Session = scoped_session(sessionmaker(bind=engine, autoflush=False, autocommit=False))
+    ensure_default_admin(Session())
+    Session.commit()
+    return Session
 
 
 def save_invoice(session, invoice_data, line_items, movements, cash_movement=None, created_by_user_id=None):
