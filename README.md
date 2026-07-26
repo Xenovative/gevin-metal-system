@@ -115,14 +115,13 @@ cd /var/www/gevin-metal-system && bash deploy/install.sh
 ```
 gevin-metal-system/
 ├── app.py
-├── config.py
-├── database.py
+├── Dockerfile
+├── docker-compose.yml
 ├── scripts/
+│   ├── docker-run.sh
 │   ├── install-ubuntu.sh
 │   └── run.sh
 ├── deploy/
-│   ├── install.sh
-│   └── gevin-metal.service
 ├── templates/
 │   └── invoice_template.xlsx
 ├── output/
