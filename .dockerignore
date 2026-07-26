@@ -1,0 +1,16 @@
+.git
+.venv
+.venv-win
+__pycache__
+*.pyc
+._*
+.DS_Store
+.cursor
+data
+output
+logs
+*.log
+*.bak
+*.md
+!README.md
+deploy

@@ -21,7 +21,52 @@
 ### 報表
 - 每日 / 每月 / 每年倉存報表與發票報表（Excel）
 
-## Linux 一鍵部署（Ubuntu / Debian）
+## Docker 部署（建議 — 客戶 Linux 伺服器 / LAN）
+
+適用於要給區網多台裝置（iPad / 手機 / PC）使用的 Linux 主機。環境固定，較少 Python/venv 問題。
+
+### 一鍵（需已安裝 Docker）
+
+```bash
+sudo apt-get update && sudo apt-get install -y git docker.io docker-compose-v2
+sudo usermod -aG docker "$USER"   # 登出再登入後生效；或暫時用 sudo
+git clone https://github.com/Xenovative/gevin-metal-system.git
+cd gevin-metal-system
+bash scripts/docker-run.sh
+```
+
+或手動：
+
+```bash
+cd gevin-metal-system
+mkdir -p data output/invoices output/reports logs
+docker compose up -d --build
+```
+
+瀏覽器：
+
+- 本機：`http://127.0.0.1:7861`
+- 區網：`http://<伺服器IP>:7861`
+
+常用指令：
+
+```bash
+docker compose logs -f      # 看日誌
+docker compose restart      # 重啟
+docker compose down         # 停止
+docker compose up -d --build   # 更新程式後重建
+```
+
+`data/`、`output/`、`logs/`、`templates/` 會掛載到主機，資料庫與發票不會因重建容器而遺失。
+
+防火牆若有開：`sudo ufw allow 7861/tcp`
+
+### 預設登入
+
+- 帳號：`admin`
+- 密碼：`admin123`
+
+## Linux 一鍵部署（不用 Docker / venv）
 
 ```bash
 sudo apt-get update && sudo apt-get install -y git && git clone https://github.com/Xenovative/gevin-metal-system.git && cd gevin-metal-system && bash scripts/install-ubuntu.sh && bash scripts/run.sh
@@ -38,11 +83,6 @@ bash scripts/run.sh
 瀏覽器：`http://127.0.0.1:7861` 或 `http://<伺服器IP>:7861`
 
 自訂埠：`PORT=8080 bash scripts/run.sh`
-
-### 預設登入
-
-- 帳號：`admin`
-- 密碼：`admin123`
 
 ## 手動安裝
 

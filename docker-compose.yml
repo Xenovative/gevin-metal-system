@@ -1,0 +1,27 @@
+services:
+  gevin-metal:
+    build: .
+    image: gevin-metal-system:latest
+    container_name: gevin-metal
+    restart: unless-stopped
+    ports:
+      # Host:Container — reachable on LAN via http://<server-ip>:7861
+      - "${PORT:-7861}:7861"
+    environment:
+      PORT: "7861"
+      GRADIO_ANALYTICS_ENABLED: "False"
+      GRADIO_SERVER_NAME: "0.0.0.0"
+      GRADIO_NODE_SERVER_NAME: "0.0.0.0"
+    volumes:
+      # Persist DB, invoices, reports, logs across rebuilds
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./logs:/app/logs
+      # Optional: override Excel template without rebuilding image
+      - ./templates:/app/templates
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7861/', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
