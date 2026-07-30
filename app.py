@@ -4,11 +4,27 @@
 """
 
 import json
+import logging
 import os
 from datetime import date, datetime
+from pathlib import Path
 
 # Quiet Gradio analytics on headless Linux servers
 os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+# Debug: verbose Gradio + app logs when GEVIN_DEBUG=1
+if os.environ.get("GEVIN_DEBUG", "").strip() in ("1", "true", "True", "yes"):
+    os.environ.setdefault("GRADIO_DEBUG", "1")
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+else:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+logger = logging.getLogger("gevin")
 
 import gradio as gr
 import pandas as pd
@@ -17,12 +33,16 @@ from config import (
     CASH_CURRENCIES,
     CASH_PAYMENT_METHOD,
     DEFAULT_CASH_CURRENCY,
+    INVENTORY_ACTION_CHOICES,
+    INVENTORY_ACTION_DEPOSIT,
+    INVENTORY_ACTION_WITHDRAW,
     ITEM_TYPES,
     OUTPUT_DIR,
     PAYMENT_METHODS,
     QUALITY_OPTIONS,
     REPORT_DIR,
-    STORAGE_LOCATION_CHOICES,
+    WAREHOUSE_LOCATION_CHOICES,
+    compose_receipt_storage,
     TRANSACTION_TYPES,
     UNITS,
     ensure_runtime_dirs,
@@ -45,7 +65,7 @@ from auth import (
     update_user_profile,
 )
 from invoice_void import void_invoice
-from cash import build_cash_movement, extract_cash_payment, get_cash_balances
+from cash import build_cash_movement, extract_cash_payment, get_cash_balances, signed_cash_warehouse_amount
 from database import init_db, save_invoice
 from inventory import (
     build_inventory_movements,
@@ -54,7 +74,12 @@ from inventory import (
     get_safe_totals,
     get_unassigned_metal_totals,
 )
-from invoice_generator import format_money, format_payment_method_display, generate_invoice_excel
+from invoice_generator import (
+    format_money,
+    format_payment_method_display,
+    generate_invoice_excel,
+    resolve_invoice_excel_path,
+)
 from invoice_number import get_next_invoice_number, validate_invoice_number
 from reports import daily_report, monthly_report, yearly_report
 
@@ -95,7 +120,7 @@ def _tab_visibility_for_user(user):
 
 
 def do_login(username, password):
-    fail = (
+    fail_login = (
         None,
         "❌ 帳號或密碼錯誤",
         gr.update(visible=True),
@@ -104,15 +129,16 @@ def do_login(username, password):
         *_tab_visibility_for_user(None),
         "",
     )
+    fail_review = _empty_review_payload("請先登入")
     try:
         user = authenticate(session, username, password)
         if not user:
-            return fail
+            return (*fail_login, *fail_review)
         log_audit(session, user, "login")
         session.commit()
     except Exception as exc:
         session.rollback()
-        return (
+        fail_exc = (
             None,
             f"❌ 登入失敗：{exc}",
             gr.update(visible=True),
@@ -121,8 +147,9 @@ def do_login(username, password):
             *_tab_visibility_for_user(None),
             "",
         )
+        return (*fail_exc, *fail_review)
     role_label = "Admin" if is_admin(user) else "員工"
-    return (
+    login_ok = (
         user,
         f"✅ 已登入：{user['display_name']}（{role_label}）",
         gr.update(visible=False),
@@ -131,6 +158,12 @@ def do_login(username, password):
         *_tab_visibility_for_user(user),
         _show_user_info_text(user),
     )
+    # Pre-load Invoice Review so dashboard data is visible immediately
+    if can_view_inventory(user):
+        review = load_review_page()
+    else:
+        review = _empty_review_payload("❌ 您沒有權限執行此操作")
+    return (*login_ok, *review)
 
 
 def _show_user_info_text(user):
@@ -255,8 +288,8 @@ def add_line_item(items_json, item_type, custom_item_type, quality, custom_quali
         return items_json, _items_to_table(items), "❌ 請填寫重量(克)"
 
     gram = float(weight_gram)
-    if gram < 0:
-        return items_json, _items_to_table(items), "❌ 重量(克)不可為負數"
+    if gram <= 0:
+        return items_json, _items_to_table(items), "❌ 重量(克)必須大於 0"
 
     tael = None
     if not _is_empty_number(weight_tael):
@@ -270,14 +303,23 @@ def add_line_item(items_json, item_type, custom_item_type, quality, custom_quali
         if oz < 0:
             return items_json, _items_to_table(items), "❌ 重量(安士)不可為負數"
 
+    unit_price_val = float(unit_price) if not _is_empty_number(unit_price) else None
+    # Amount = Cash Warehouse: keep signed value; if left at 0 but unit price set, auto total
+    if _is_empty_number(amount):
+        amount_val = 0.0
+    else:
+        amount_val = float(amount)
+    if abs(amount_val) < 0.000001 and unit_price_val is not None and abs(unit_price_val) > 0:
+        amount_val = round(unit_price_val * gram, 2)
+
     items.append({
         "item_type": resolved_item,
         "quality": resolved_quality,
         "weight_gram": gram,
         "weight_tael": tael,
         "weight_oz": oz,
-        "unit_price": float(unit_price) if not _is_empty_number(unit_price) else None,
-        "amount": float(amount) if not _is_empty_number(amount) else None,
+        "unit_price": unit_price_val,
+        "amount": amount_val,
         "unit": unit,
     })
     return json.dumps(items, ensure_ascii=False), _items_to_table(items), ""
@@ -350,14 +392,13 @@ def _amount_fields_visibility(tx_type):
 
 
 def _calculate_invoice_total(main_items, note_amount, has_amount):
+    """Sum Cash Warehouse (Amount) values; default 0. May be positive or negative."""
     if not has_amount:
-        return None
-    item_amounts = [it.get("amount") for it in main_items if it.get("amount") is not None]
-    has_note_amount = not _is_empty_number(note_amount)
-    if not item_amounts and not has_note_amount:
-        return None
-    total = sum(float(a) for a in item_amounts)
-    if has_note_amount:
+        return 0.0
+    total = 0.0
+    for it in main_items:
+        total += float(it.get("amount") or 0)
+    if not _is_empty_number(note_amount):
         total += float(note_amount)
     return total
 
@@ -386,6 +427,9 @@ def build_payments_json(
 def validate_payments(selected_methods, amounts, total_amount, cash_currency, invoice_currency):
     if total_amount is None:
         return None
+    # Amount/Cash Warehouse total may be +/- ; skip payment check when net is 0
+    if abs(float(total_amount)) < 0.01:
+        return None
     if not selected_methods:
         return "請至少選擇一種付款方式"
     invoice_currency = invoice_currency or DEFAULT_CASH_CURRENCY
@@ -397,10 +441,11 @@ def validate_payments(selected_methods, amounts, total_amount, cash_currency, in
     if CASH_PAYMENT_METHOD in (selected_methods or []) and not cash_currency:
         return "請選擇現金貨幣"
     payment_total = sum(float(amounts[PAYMENT_METHODS.index(m)]) for m in selected_methods)
-    if total_amount and abs(payment_total - float(total_amount)) > 0.01:
+    # Compare payment split to absolute Cash Warehouse total
+    if abs(payment_total - abs(float(total_amount))) > 0.01:
         return (
             f"付款金額合計 ({format_money(payment_total, invoice_currency)}) "
-            f"與發票合計 ({format_money(total_amount, invoice_currency)}) 不符"
+            f"與現金倉金額合計 ({format_money(abs(float(total_amount)), invoice_currency)}) 不符"
         )
     return None
 
@@ -441,12 +486,22 @@ def on_basic_info_change(tx_type, tx_date):
     )
 
 
+def default_inventory_action(tx_type):
+    """Suggest Deposit for inbound/exchange, Withdraw for outbound."""
+    direction = (TRANSACTION_TYPES.get(tx_type) or {}).get("inventory_direction")
+    if direction in ("in", "exchange"):
+        return INVENTORY_ACTION_DEPOSIT
+    if direction == "out":
+        return INVENTORY_ACTION_WITHDRAW
+    return None
+
+
 def submit_invoice(
     tx_type, invoice_no, customer_name, customer_phone, tx_date, handler,
     selected_payment_methods,
     pay_amt_cash, pay_amt_transfer, pay_amt_cheque, pay_amt_other,
     cash_currency, invoice_currency,
-    source_location, destination_location,
+    inventory_action, warehouse_location,
     notes, note_amount,
     main_items_json, exchange_items_json,
     current_user,
@@ -468,10 +523,16 @@ def submit_invoice(
 
     customer_phone = (customer_phone or "").strip()
 
-    if not source_location:
-        return "❌ 請選擇倉存存取", None, _items_to_table([])
-    if not destination_location:
-        return "❌ 請選擇倉存位置", None, _items_to_table([])
+    if not inventory_action:
+        return "❌ 請選擇 Inventory Deposit/Withdrawal（存入／取出）", None, _items_to_table([])
+    if not warehouse_location:
+        return "❌ 請選擇 Warehouse Location（A/B/C 倉庫）", None, _items_to_table([])
+
+    source_location, destination_location = compose_receipt_storage(
+        inventory_action, warehouse_location, tx_type,
+    )
+    if not source_location or not destination_location:
+        return "❌ 倉存存取設定無效", None, _items_to_table([])
 
     invoice_no = (invoice_no or "").strip()
     if not invoice_no:
@@ -515,9 +576,10 @@ def submit_invoice(
         build_payments_json(
             selected_payment_methods, payment_amounts, cash_currency, invoice_currency,
         )
-        if total is not None else ""
+        if abs(float(total or 0)) > 0.01 else ""
     )
 
+    note_amt = float(note_amount) if (has_amount and not _is_empty_number(note_amount)) else 0.0
     invoice_data = {
         "invoice_no": invoice_no.strip(),
         "transaction_type": tx_type,
@@ -530,8 +592,12 @@ def submit_invoice(
         "source_location": source_location,
         "destination_location": destination_location,
         "notes": notes or "",
-        "note_amount": float(note_amount) if (has_amount and not _is_empty_number(note_amount)) else 0,
-        "total_amount": total,
+        "note_amount": note_amt,
+        "total_amount": total if total is not None else 0.0,
+        # Cash Warehouse signed by transaction type (購入=出倉負數, 銷售=入倉正數等)
+        "cash_warehouse_amount": signed_cash_warehouse_amount(
+            total if total is not None else 0.0, tx_type
+        ),
     }
 
     try:
@@ -539,7 +605,8 @@ def submit_invoice(
             invoice_data, main_items,
             exchange_items if exchange_items else None,
         )
-        invoice_data["excel_path"] = excel_path
+        # Persist portable relative name; keep absolute path for Gradio download
+        invoice_data["excel_path"] = Path(excel_path).name
         movements = build_inventory_movements(tx_type, main_items, exchange_items or None)
         cash_movement = build_cash_movement(invoice_data)
         save_invoice(
@@ -550,29 +617,41 @@ def submit_invoice(
         )
         log_audit(session, current_user, "create_invoice", "invoice", invoice_no)
         session.commit()
+        session.expire_all()
 
-        cash_info = extract_cash_payment(payment_json)
+        from invoice_generator import format_cash_warehouse_amount
+
+        cash_line = ""
+        if cash_movement:
+            signed = cash_movement.get("signed_amount")
+            if signed is None:
+                signed = cash_movement["amount"] if cash_movement["direction"] == "in" else -cash_movement["amount"]
+            cash_line = (
+                f"現金倉：{format_cash_warehouse_amount(signed, cash_movement.get('currency') or invoice_currency)}\n"
+            )
         msg = (
             f"✅ 發票已成功生成！\n"
             f"單號：{invoice_no}\n"
             f"客戶：{customer_name}\n"
             + (f"電話：{customer_phone}\n" if customer_phone else "")
+            + f"Inventory：{'Deposit 存入' if inventory_action == INVENTORY_ACTION_DEPOSIT else 'Withdraw 取出'}"
+            + f" Gold/Silver @ {warehouse_location}\n"
             + f"倉存存取：{source_location} → 倉存位置：{destination_location}\n"
-            + (f"合計：{format_money(total, invoice_currency)}\n" if total is not None else "")
+            + f"Total Foreign Currency：{format_cash_warehouse_amount(invoice_data.get('cash_warehouse_amount'), invoice_currency)}\n"
             + (
                 f"付款：{format_payment_method_display(payment_json)}\n"
                 if payment_json else ""
             )
-            + (
-                f"現金倉：{'+' if cash_movement['direction'] == 'in' else '-'}"
-                f"{cash_info['currency']} {cash_info['amount']:,.2f}\n"
-                if cash_movement else ""
-            )
+            + cash_line
             + f"檔案：{excel_path}"
         )
         return msg, excel_path, _items_to_table(main_items)
     except Exception as e:
         session.rollback()
+        logger.exception("Invoice create failed for %s", invoice_no)
+        err = str(e)
+        if "UNIQUE" in err.upper() or "unique" in err.lower():
+            return f"❌ 單號重複：{invoice_no}，請重新整理後再試", None, _items_to_table(main_items)
         return f"❌ 生成失敗：{e}", None, _items_to_table(main_items)
 
 
@@ -581,7 +660,7 @@ def submit_and_refresh(
     selected_payment_methods,
     pay_amt_cash, pay_amt_transfer, pay_amt_cheque, pay_amt_other,
     cash_currency, invoice_currency,
-    source_location, destination_location,
+    inventory_action, warehouse_location,
     notes, note_amount,
     main_items_json, exchange_items_json,
     current_user,
@@ -591,7 +670,7 @@ def submit_and_refresh(
         selected_payment_methods,
         pay_amt_cash, pay_amt_transfer, pay_amt_cheque, pay_amt_other,
         cash_currency, invoice_currency,
-        source_location, destination_location,
+        inventory_action, warehouse_location,
         notes, note_amount,
         main_items_json, exchange_items_json,
         current_user,
@@ -601,18 +680,35 @@ def submit_and_refresh(
         banner = _invoice_no_banner(next_no, tx_type)
         empty = _items_to_table([])
         return (
-            msg, excel_path, table,
+            msg, excel_path,
             gr.update(value=next_no), banner,
             "", "", "[]", empty, "[]", empty, "", None,
             *_reset_payment_fields(),
         )
     return (
-        msg, excel_path, table,
+        msg, excel_path,
         gr.update(value=invoice_no), _invoice_no_banner(invoice_no or "", tx_type),
         customer_name, customer_phone, main_items_json, table,
         exchange_items_json, _items_to_table(parse_line_items_json(exchange_items_json)),
         notes, note_amount,
         gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+    )
+
+
+def refresh_review_after_submit(result_msg, current_user):
+    """After a successful create-invoice, reload Invoice Review tables."""
+    if isinstance(result_msg, str) and result_msg.startswith("✅"):
+        return run_load_inventory_page(current_user)
+    return (
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
     )
 
 
@@ -628,15 +724,86 @@ def start_new_invoice(tx_type, tx_date):
     )
 
 
+MOVEMENT_TABLE_COLUMNS = [
+    "日期", "單號", "單據狀態", "記錄類型", "性質", "方向",
+    "貨品", "成色", "重量(克)", "重量(両)", "重量(安士)",
+    "客戶", "倉存存取", "倉存位置",
+]
+STOCK_TABLE_COLUMNS = ["貨品", "成色", "結存(克)"]
+REVIEW_ITEMS_COLUMNS = ["區塊", "貨品", "成色", "重量(克)", "重量(両)", "單價", "金額"]
+
+
+def _empty_movements_df():
+    return pd.DataFrame(columns=MOVEMENT_TABLE_COLUMNS)
+
+
+def _empty_stock_df():
+    return pd.DataFrame(columns=STOCK_TABLE_COLUMNS)
+
+
+def _empty_review_items_df():
+    return pd.DataFrame(columns=REVIEW_ITEMS_COLUMNS)
+
+
+def _empty_review_payload(message=""):
+    return (
+        f"<p>{message}</p>" if message else "<p></p>",
+        _empty_stock_df(),
+        _empty_movements_df(),
+        gr.update(choices=[], value=None),
+        "",
+        "<p>請在步驟 3 輸入或選擇單號，再按「預覽」。</p>",
+        _empty_review_items_df(),
+        None,
+        message or "",
+    )
+
+
 def run_load_inventory_page(current_user):
     err = require_view_inventory(current_user)
     if err:
-        empty_stock = pd.DataFrame(columns=["貨品", "成色", "結存(克)"])
-        return f"<p>{err}</p>", empty_stock, pd.DataFrame()
-    return load_inventory_page()
+        return _empty_review_payload(err)
+    return load_review_page()
+
+
+def load_review_page():
+    """Invoice Review steps 1–2 data + recent order numbers for step 3."""
+    # Avoid stale SQLAlchemy identity-map reads across Gradio worker threads
+    session.expire_all()
+    now_text = datetime.now().strftime("目前時間：%Y年%m月%d日 %H:%M")
+    totals = get_safe_totals(session)
+    cash_balances = get_cash_balances(session)
+    unassigned = get_unassigned_metal_totals(session)
+    nos = list_recent_invoice_nos()
+    count_msg = f"已載入 {len(nos)} 張近期發票、進出倉記錄已更新。"
+    return (
+        build_safe_summary_html(totals, now_text, cash_balances, unassigned),
+        load_stock(),
+        load_movements(),
+        gr.update(choices=nos, value=(nos[0] if nos else None)),
+        nos[0] if nos else "",
+        "<p>請在步驟 3 輸入或選擇單號，再按「預覽」。</p>",
+        _empty_review_items_df(),
+        None,
+        f"✅ {count_msg}" if nos else "⚠️ 尚無發票資料。請先在「開立發票」建立單據後再刷新。",
+    )
+
+
+def list_recent_invoice_nos(limit=80):
+    from database import Invoice
+
+    rows = (
+        session.query(Invoice.invoice_no)
+        .order_by(Invoice.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [r[0] for r in rows]
 
 
 def load_inventory_page():
+    """Backward-compatible inventory-only payload (summary/stock/movements). """
+    session.expire_all()
     now_text = datetime.now().strftime("目前時間：%Y年%m月%d日 %H:%M")
     totals = get_safe_totals(session)
     cash_balances = get_cash_balances(session)
@@ -651,7 +818,7 @@ def load_inventory_page():
 def load_stock():
     stock = get_current_stock(session)
     if not stock:
-        return pd.DataFrame(columns=["貨品", "成色", "結存(克)"])
+        return _empty_stock_df()
     return pd.DataFrame([
         {
             "貨品": s["item_type"],
@@ -665,6 +832,7 @@ def load_stock():
 def load_movements():
     from database import InventoryMovement, Invoice
 
+    session.expire_all()
     records = (
         session.query(InventoryMovement)
         .order_by(InventoryMovement.movement_date.desc(), InventoryMovement.id.desc())
@@ -672,7 +840,7 @@ def load_movements():
         .all()
     )
     if not records:
-        return pd.DataFrame()
+        return _empty_movements_df()
 
     invoice_nos = {r.invoice_no for r in records if r.invoice_no}
     status_map = {}
@@ -682,7 +850,7 @@ def load_movements():
 
     return pd.DataFrame([
         {
-            "日期": r.movement_date.strftime("%Y-%m-%d"),
+            "日期": r.movement_date.strftime("%Y-%m-%d") if r.movement_date else "",
             "單號": r.invoice_no,
             "單據狀態": _invoice_status_label(status_map.get(r.invoice_no, "active")),
             "記錄類型": _movement_kind_label(getattr(r, "movement_kind", "normal")),
@@ -699,6 +867,136 @@ def load_movements():
         }
         for r in records
     ])
+
+
+def _fill_order_no_from_movement(evt: gr.SelectData, movement_df):
+    """Step 2 → Step 3: clicking a movement row fills the order number."""
+    if movement_df is None or getattr(movement_df, "empty", True):
+        return gr.update(), gr.update()
+    try:
+        row_idx = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+        invoice_no = str(movement_df.iloc[int(row_idx)]["單號"]).strip()
+        # Update textbox for preview; dropdown value only if already in choices
+        return gr.update(), invoice_no
+    except Exception:
+        return gr.update(), gr.update()
+
+
+def _pick_recent_invoice(selected_no):
+    """Dropdown pick → fill order-number textbox."""
+    selected_no = (selected_no or "").strip()
+    return selected_no
+
+
+def _on_main_tabs_select(evt: gr.SelectData, current_user):
+    """Reload Invoice Review whenever that tab is opened."""
+    label = str(getattr(evt, "value", "") or "")
+    if "Invoice Review" in label or "發票查閱" in label:
+        return run_load_inventory_page(current_user)
+    return (
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+    )
+
+def run_preview_invoice(invoice_no, current_user):
+    """Steps 4–5: preview invoice details and prepare Excel for print/download."""
+    from database import Invoice, InvoiceLineItem
+    from invoice_generator import format_money, format_payment_method_display
+
+    empty_items = _empty_review_items_df()
+    err = require_view_inventory(current_user)
+    if err:
+        return f"<p>{err}</p>", empty_items, None, err
+
+    invoice_no = (invoice_no or "").strip()
+    if not invoice_no:
+        return (
+            "<p>❌ 請先輸入或選擇單號</p>",
+            empty_items,
+            None,
+            "❌ 請先輸入或選擇單號",
+        )
+
+    session.expire_all()
+    invoice = session.query(Invoice).filter(Invoice.invoice_no == invoice_no).first()
+    if not invoice:
+        return (
+            f"<p>❌ 找不到單號「{invoice_no}」</p>",
+            empty_items,
+            None,
+            f"❌ 找不到單號「{invoice_no}」",
+        )
+
+    lines = (
+        session.query(InvoiceLineItem)
+        .filter(InvoiceLineItem.invoice_id == invoice.id)
+        .order_by(InvoiceLineItem.sort_order, InvoiceLineItem.id)
+        .all()
+    )
+    currency = invoice.invoice_currency or "HKD$"
+    items_df = pd.DataFrame([
+        {
+            "區塊": "對換" if (line.section or "") == "exchange" else "主項",
+            "貨品": line.item_type or "",
+            "成色": line.quality or "",
+            "重量(克)": line.weight_gram,
+            "重量(両)": line.weight_tael,
+            "單價": line.unit_price,
+            "金額": line.amount,
+        }
+        for line in lines
+    ]) if lines else empty_items
+
+    status = _invoice_status_label(invoice.status or "active")
+    payment_text = format_payment_method_display(invoice.payment_method or "")
+    preview_html = f"""
+    <div style="line-height:1.6">
+      <h3>步驟 4 — 發票預覽</h3>
+      <p><b>單號：</b>{invoice.invoice_no} &nbsp; <b>狀態：</b>{status}</p>
+      <p><b>交易性質：</b>{invoice.transaction_type}
+         &nbsp; <b>日期：</b>{invoice.transaction_date.strftime('%Y-%m-%d') if invoice.transaction_date else ''}</p>
+      <p><b>客戶：</b>{invoice.customer_name or ''}
+         &nbsp; <b>電話：</b>{invoice.customer_phone or ''}</p>
+      <p><b>經手人：</b>{invoice.handler or ''}</p>
+      <p><b>倉存存取：</b>{invoice.source_location or ''}
+         → <b>倉存位置：</b>{invoice.destination_location or ''}</p>
+      <p><b>付款方式：</b>{payment_text or '—'}</p>
+      <p><b>合計：</b>{format_money(invoice.total_amount, currency) if invoice.total_amount is not None else '—'}</p>
+      <p><b>備註：</b>{(invoice.notes or '—').replace(chr(10), '<br>')}</p>
+    </div>
+    """
+
+    excel_path = (invoice.excel_path or "").strip()
+    print_file = resolve_invoice_excel_path(excel_path, invoice.invoice_no)
+    if print_file:
+        msg = f"✅ 已載入 {invoice_no}。請於步驟 5 下載 Excel，用 A4 品牌收據紙列印。"
+    else:
+        msg = (
+            f"⚠️ 已載入 {invoice_no} 預覽，但找不到 Excel 檔案"
+            f"{f'（{excel_path}）' if excel_path else ''}，無法列印下載。"
+        )
+
+    log_audit(
+        session,
+        current_user,
+        "preview_invoice",
+        target_type="invoice",
+        target_id=invoice_no,
+        details="Invoice Review preview",
+    )
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+
+    return preview_html, items_df, print_file, msg
 
 
 def run_daily_report(current_user):
@@ -760,7 +1058,7 @@ def build_app():
 
             gr.Markdown("銷售人員請依照步驟填寫資料，系統將自動生成對應的 Excel 發票並更新倉存記錄。")
 
-            with gr.Tabs():
+            with gr.Tabs() as main_tabs:
                 # ── Tab 1: 開立發票 ──
                 with gr.Tab("📋 開立發票") as invoice_tab:
                     invoice_no_banner = gr.Markdown(
@@ -800,9 +1098,9 @@ def build_app():
                     with payment_section:
                         invoice_currency = gr.Dropdown(
                             choices=CASH_CURRENCIES,
-                            label="發票貨幣（金額及合計）",
+                            label="Currency / Total Foreign Currency *",
                             value=DEFAULT_CASH_CURRENCY,
-                            info="貨品金額、備註金額、合計及非現金付款將使用此貨幣",
+                            info="合計 Total 外幣：寫入發票合計旁貨幣欄（HKD$ / USD$ / CNY¥ …）",
                         )
                         payment_methods = gr.CheckboxGroup(
                             choices=PAYMENT_METHODS,
@@ -822,16 +1120,23 @@ def build_app():
                         with gr.Row():
                             pay_amt_cheque = gr.Number(label="支票 Cheque 金額", precision=2)
                             pay_amt_other = gr.Number(label="其他 Other 金額", precision=2)
+                    gr.Markdown(
+                        "#### Receipt Inventory Deposit/Withdrawal\n"
+                        "Deposit Gold/Silver → Warehouse Location　｜　"
+                        "Withdraw Gold/Silver from Warehouse"
+                    )
                     with gr.Row():
-                        source_location = gr.Dropdown(
-                            choices=STORAGE_LOCATION_CHOICES,
-                            label="倉存存取 *",
-                            info="存/取 A倉庫、B倉庫、C倉庫或現金倉",
+                        inventory_action = gr.Radio(
+                            choices=INVENTORY_ACTION_CHOICES,
+                            label="Inventory Deposit/Withdrawal *",
+                            info="存入／取出 Gold & Silver",
+                            value=INVENTORY_ACTION_DEPOSIT,
                         )
-                        destination_location = gr.Dropdown(
-                            choices=STORAGE_LOCATION_CHOICES,
-                            label="倉存位置 *",
-                            info="存/取 A倉庫、B倉庫、C倉庫或現金倉（寫入公司單庫存欄）",
+                        warehouse_location = gr.Dropdown(
+                            choices=WAREHOUSE_LOCATION_CHOICES,
+                            label="Warehouse Location *",
+                            info="A / B / C 倉庫（Gold & Silver）",
+                            value=WAREHOUSE_LOCATION_CHOICES[0],
                         )
 
                     gr.Markdown("### 步驟 2：新增貨品（可新增多項）")
@@ -854,8 +1159,13 @@ def build_app():
                         )
                     item_add_status = gr.Textbox(label="提示", interactive=False, lines=1)
                     with gr.Row():
-                        unit_price = gr.Number(label="單價（選填）", precision=2)
-                        amount = gr.Number(label="金額（選填）", precision=2)
+                        unit_price = gr.Number(label="單價（選填）", precision=2, value=0)
+                        amount = gr.Number(
+                            label="金額／現金倉 Amount (Cash Warehouse)",
+                            precision=2,
+                            value=0,
+                            info="可為正數或負數；預設 0。正=入現金倉，負=出現金倉",
+                        )
                         unit = gr.Dropdown(choices=UNITS, label="單位", value="克 Gram")
 
                     main_items_json = gr.State(empty_items)
@@ -890,8 +1200,12 @@ def build_app():
                             )
                         ex_item_add_status = gr.Textbox(label="提示", interactive=False, lines=1)
                         with gr.Row():
-                            ex_unit_price = gr.Number(label="對換單價（選填）", precision=2)
-                            ex_amount = gr.Number(label="對換金額（選填）", precision=2)
+                            ex_unit_price = gr.Number(label="對換單價（選填）", precision=2, value=0)
+                            ex_amount = gr.Number(
+                                label="對換金額／現金倉（可正負，預設 0）",
+                                precision=2,
+                                value=0,
+                            )
                         exchange_items_json = gr.State(empty_items)
                         with gr.Row():
                             btn_ex_add = gr.Button("➕ 新增對換貨品", variant="secondary")
@@ -906,7 +1220,12 @@ def build_app():
                             label="備註",
                             placeholder="例：補水費/加工費/訂金、代提純費、D26060001 待提純後回料",
                         )
-                        note_amount = gr.Number(label="備註金額", precision=2, visible=True)
+                        note_amount = gr.Number(
+                            label="備註金額／現金倉（可正負，預設 0）",
+                            precision=2,
+                            value=0,
+                            visible=True,
+                        )
 
                     with gr.Row():
                         submit_btn = gr.Button("✅ 生成發票 Excel", variant="primary", size="lg")
@@ -915,15 +1234,20 @@ def build_app():
                     result_msg = gr.Textbox(label="結果", interactive=False, lines=5)
                     excel_download = gr.File(label="下載發票")
 
+                    def on_tx_type_change(tx_type, tx_date):
+                        base = on_basic_info_change(tx_type, tx_date)
+                        action = default_inventory_action(tx_type)
+                        return (*base, gr.update(value=action) if action else gr.update())
+
                     tx_type.input(
-                        on_basic_info_change, [tx_type, tx_date],
+                        on_tx_type_change, [tx_type, tx_date],
                         [exchange_section, invoice_no, invoice_no_banner, tx_desc,
-                         note_amount, payment_section],
+                         note_amount, payment_section, inventory_action],
                     )
                     tx_type.change(
-                        on_basic_info_change, [tx_type, tx_date],
+                        on_tx_type_change, [tx_type, tx_date],
                         [exchange_section, invoice_no, invoice_no_banner, tx_desc,
-                         note_amount, payment_section],
+                         note_amount, payment_section, inventory_action],
                     )
                     tx_date.change(
                         auto_generate_invoice_no, [tx_type, tx_date],
@@ -952,16 +1276,16 @@ def build_app():
                     )
                     btn_ex_clear.click(clear_items, outputs=[exchange_items_json, exchange_items_table])
 
-                    submit_btn.click(
+                    submit_event = submit_btn.click(
                         submit_and_refresh,
                         [tx_type, invoice_no, customer_name, customer_phone, tx_date, handler,
                          payment_methods, pay_amt_cash, pay_amt_transfer, pay_amt_cheque, pay_amt_other,
                          cash_currency, invoice_currency,
-                         source_location, destination_location,
+                         inventory_action, warehouse_location,
                          notes, note_amount,
                          main_items_json, exchange_items_json, current_user],
                         [
-                            result_msg, excel_download, main_items_table,
+                            result_msg, excel_download,
                             invoice_no, invoice_no_banner,
                             customer_name, customer_phone, main_items_json, main_items_table,
                             exchange_items_json, exchange_items_table,
@@ -985,24 +1309,110 @@ def build_app():
                         toggle_cash_currency, payment_methods, cash_currency,
                     )
 
-                # ── Tab 2: 倉存 ──
-                with gr.Tab("📦 倉存管理", visible=False) as inventory_tab:
-                    gr.Markdown("### 各倉庫總額")
+                # ── Tab 2: Invoice Review（固定順序）──
+                with gr.Tab("🔎 發票查閱 Invoice Review", visible=False) as inventory_tab:
+                    gr.Markdown(
+                        "依序操作：**1 倉存管理 → 2 進出倉記錄 → 3 單號 → 4 預覽 → 5 列印**\n\n"
+                        "開立發票後請按 **🔄 刷新**，或重新點開本分頁以載入最新資料。"
+                    )
+
+                    gr.Markdown("### 1. Inventory Management（倉存管理）")
+                    gr.Markdown("#### 各倉庫總額")
                     safe_summary = gr.HTML()
-                    gr.Markdown("### 目前庫存結存")
-                    stock_table = gr.Dataframe(label="庫存結存", interactive=False)
-                    gr.Markdown("### 最近進出倉記錄")
-                    movement_table = gr.Dataframe(label="進出倉明細", interactive=False)
-                    refresh_btn = gr.Button("🔄 刷新倉存資料")
+                    gr.Markdown("#### 目前庫存結存")
+                    stock_table = gr.Dataframe(
+                        label="庫存結存",
+                        headers=STOCK_TABLE_COLUMNS,
+                        value=_empty_stock_df(),
+                        interactive=False,
+                    )
+
+                    gr.Markdown("### 2. Recent Inbound/Outbound Records（最近進出倉記錄）")
+                    gr.Markdown("點選一列可自動帶入下方單號。")
+                    movement_table = gr.Dataframe(
+                        label="進出倉明細",
+                        headers=MOVEMENT_TABLE_COLUMNS,
+                        value=_empty_movements_df(),
+                        interactive=True,
+                    )
+                    refresh_btn = gr.Button("🔄 刷新倉存與記錄", variant="secondary")
+
+                    gr.Markdown("### 3. Order Number（單號）")
+                    with gr.Row():
+                        review_invoice_pick = gr.Dropdown(
+                            label="近期單號（下拉選擇）",
+                            choices=[],
+                            filterable=True,
+                            info="選擇後會填入右側單號欄",
+                        )
+                        review_invoice_no = gr.Textbox(
+                            label="單號 Order Number *",
+                            placeholder="例：S260700001",
+                            info="可手動輸入，或由上方記錄／下拉帶入",
+                        )
+                        preview_btn = gr.Button("4. 預覽 Preview", variant="primary")
+
+                    gr.Markdown("### 4. Preview（預覽）")
+                    review_preview = gr.HTML(
+                        value="<p>請在步驟 3 輸入或選擇單號，再按「預覽」。</p>"
+                    )
+                    review_items_table = gr.Dataframe(
+                        label="貨品明細",
+                        interactive=False,
+                        headers=REVIEW_ITEMS_COLUMNS,
+                        value=_empty_review_items_df(),
+                    )
+                    review_msg = gr.Textbox(label="查閱狀態", interactive=False, lines=2)
+
+                    gr.Markdown("### 5. Print（列印）")
+                    gr.Markdown(
+                        "下載 Excel 後，以 **A4 品牌收據紙** 列印（客戶單 + 公司單）。"
+                    )
+                    review_print_file = gr.File(label="下載／列印發票 Excel")
+
+                    review_outputs = [
+                        safe_summary,
+                        stock_table,
+                        movement_table,
+                        review_invoice_pick,
+                        review_invoice_no,
+                        review_preview,
+                        review_items_table,
+                        review_print_file,
+                        review_msg,
+                    ]
                     refresh_btn.click(
                         run_load_inventory_page,
                         current_user,
-                        outputs=[safe_summary, stock_table, movement_table],
+                        outputs=review_outputs,
                     )
-                    inventory_tab.select(
-                        run_load_inventory_page,
+                    # Single tab-select reload (avoid double-fire with inventory_tab.select)
+                    main_tabs.select(
+                        _on_main_tabs_select,
                         current_user,
-                        outputs=[safe_summary, stock_table, movement_table],
+                        outputs=review_outputs,
+                    )
+                    movement_table.select(
+                        _fill_order_no_from_movement,
+                        [movement_table],
+                        [review_invoice_pick, review_invoice_no],
+                    )
+                    review_invoice_pick.change(
+                        _pick_recent_invoice,
+                        review_invoice_pick,
+                        review_invoice_no,
+                    )
+                    preview_btn.click(
+                        run_preview_invoice,
+                        [review_invoice_no, current_user],
+                        [review_preview, review_items_table, review_print_file, review_msg],
+                    )
+
+                    # After invoice create succeeds, refresh Invoice Review from DB
+                    submit_event.then(
+                        refresh_review_after_submit,
+                        [result_msg, current_user],
+                        outputs=review_outputs,
                     )
 
                 # ── Tab 3: 報表 ──
@@ -1099,6 +1509,7 @@ def build_app():
             [
                 current_user, login_msg, login_panel, main_app, handler,
                 invoice_tab, inventory_tab, reports_tab, admin_tab, user_info,
+                *review_outputs,
             ],
         )
         logout_btn.click(
@@ -1115,6 +1526,8 @@ def build_app():
 
 if __name__ == "__main__":
     ensure_runtime_dirs()
+    debug = os.environ.get("GEVIN_DEBUG", "").strip() in ("1", "true", "True", "yes")
+    logger.info("Starting Gevin Metal System (debug=%s)", debug)
     app = build_app()
     port = int(os.environ.get("PORT", "7861"))
     # Bind all interfaces so LAN devices (iPad/phone/PC) can reach the Linux server.
@@ -1130,10 +1543,12 @@ if __name__ == "__main__":
         "ssr_mode": False,
         "theme": gr.themes.Soft(),
     }
+    if debug:
+        launch_kwargs["debug"] = True
     try:
         app.launch(**launch_kwargs)
     except TypeError:
         # Older Gradio without newer launch kwargs
-        for key in ("allowed_paths", "show_error", "strict_cors", "ssr_mode", "theme"):
+        for key in ("allowed_paths", "show_error", "strict_cors", "ssr_mode", "theme", "debug"):
             launch_kwargs.pop(key, None)
         app.launch(**launch_kwargs)

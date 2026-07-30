@@ -60,11 +60,47 @@ WAREHOUSES = ["A倉庫", "B倉庫", "C倉庫", "現金倉"]
 METAL_WAREHOUSES = ["A倉庫", "B倉庫", "C倉庫"]
 CASH_WAREHOUSE = "現金倉"
 STORAGE_ACTIONS = ["存", "取"]
+# Receipt Inventory Deposit/Withdrawal (存入／取出) + Gold/Silver warehouse A/B/C
+INVENTORY_ACTION_DEPOSIT = "存"
+INVENTORY_ACTION_WITHDRAW = "取"
+INVENTORY_ACTION_CHOICES = [
+    ("Deposit 存入 Gold/Silver", INVENTORY_ACTION_DEPOSIT),
+    ("Withdraw 取出 Gold/Silver", INVENTORY_ACTION_WITHDRAW),
+]
+WAREHOUSE_LOCATION_CHOICES = list(METAL_WAREHOUSES)  # A / B / C for Gold & Silver
 STORAGE_LOCATION_CHOICES = [
     f"{action} {warehouse}"
     for action in STORAGE_ACTIONS
     for warehouse in WAREHOUSES
 ]
+EXTERNAL_PARTY_LOCATION = "客戶"
+
+
+def compose_receipt_storage(action, warehouse, transaction_type=None):
+    """
+    Receipt Inventory Deposit/Withdrawal → source + destination labels.
+
+    Deposit Gold/Silver A: Warehouse Location  → 存 {warehouse}
+    Withdraw Gold/Silver A                     → 取 {warehouse}
+    """
+    del transaction_type  # reserved for future auto-defaults
+    action = (action or "").strip()
+    warehouse = (warehouse or "").strip()
+    if action not in STORAGE_ACTIONS or not warehouse:
+        return "", ""
+
+    if action == INVENTORY_ACTION_DEPOSIT:
+        # Deposit into warehouse location
+        return (
+            f"{INVENTORY_ACTION_WITHDRAW} {EXTERNAL_PARTY_LOCATION}",
+            f"{INVENTORY_ACTION_DEPOSIT} {warehouse}",
+        )
+
+    # Withdraw from warehouse location
+    return (
+        f"{INVENTORY_ACTION_WITHDRAW} {warehouse}",
+        f"{INVENTORY_ACTION_DEPOSIT} {EXTERNAL_PARTY_LOCATION}",
+    )
 
 # 舊版保險箱名稱對照（讀取歷史資料用）
 WAREHOUSE_ALIASES = {
@@ -117,7 +153,7 @@ TRANSACTION_TYPES = {
         "inventory_direction": "exchange",
         "has_exchange": True,
         "has_amount": True,
-        "customer_notes_col": 4,
+        "customer_notes_col": 5,
         "description": "客戶來料兌換新貨，需填寫「對換貨品」",
     },
     "交收去料": {

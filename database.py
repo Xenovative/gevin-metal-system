@@ -146,15 +146,13 @@ def _migrate_db(engine):
             "source_location VARCHAR(50)",
             "destination_location VARCHAR(50)",
             "movement_kind VARCHAR(20)",
+            "weight_oz FLOAT",
         ],
         "cash_movements": [
             "currency VARCHAR(20)",
             "movement_kind VARCHAR(20)",
         ],
         "invoice_line_items": [
-            "weight_oz FLOAT",
-        ],
-        "inventory_movements": [
             "weight_oz FLOAT",
         ],
     }
@@ -236,7 +234,11 @@ def save_invoice(session, invoice_data, line_items, movements, cash_movement=Non
                 weight_tael=item.get("weight_tael"),
                 weight_oz=item.get("weight_oz"),
                 unit_price=item.get("unit_price"),
-                amount=item.get("amount"),
+                amount=(
+                    float(item["amount"])
+                    if item.get("amount") is not None and item.get("amount") != ""
+                    else 0.0
+                ),
                 sort_order=idx,
             )
         )
@@ -279,5 +281,5 @@ def save_invoice(session, invoice_data, line_items, movements, cash_movement=Non
             )
         )
 
-    session.commit()
+    # Caller commits after audit log so create is one transaction
     return invoice

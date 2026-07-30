@@ -84,6 +84,8 @@ bash scripts/run.sh
 
 自訂埠：`PORT=8080 bash scripts/run.sh`
 
+除錯模式（詳細日誌）：`GEVIN_DEBUG=1 bash scripts/run.sh`
+
 ## 手動安裝
 
 ```bash

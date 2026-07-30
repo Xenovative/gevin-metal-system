@@ -67,7 +67,7 @@ def get_next_invoice_number(session, transaction_type: str, tx_date) -> str:
     return format_invoice_number(prefix, tx_date.year, tx_date.month, max_seq + 1)
 
 
-def validate_invoice_number(invoice_no: str, transaction_type: str, tx_date) -> str | None:
+def validate_invoice_number(invoice_no, transaction_type, tx_date):
     """驗證單號格式是否正確，回傳錯誤訊息或 None。"""
     parsed = parse_invoice_number(invoice_no)
     if not parsed:

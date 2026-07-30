@@ -8,6 +8,7 @@ from openpyxl.worksheet.page import PageMargins
 from openpyxl.worksheet.properties import PageSetupProperties
 
 from config import DEFAULT_CASH_CURRENCY, GRAMS_PER_TAEL, OUTPUT_DIR, TEMPLATE_PATH, TRANSACTION_TYPES
+from cash import signed_cash_warehouse_amount
 
 # 客戶單（上半部）與公司單（下半部）列號對照
 # Row heights in templates/invoice_template.xlsx leave top/mid spacers so
@@ -63,6 +64,31 @@ def format_money(value, currency=None):
     return f"{currency} {num:,.2f}"
 
 
+def format_cash_warehouse_amount(value, currency=None):
+    """
+    Excel Amount column = Cash Warehouse (現金倉).
+    Signed: positive = 入倉, negative = 出倉. Default 0.
+    """
+    currency = currency or DEFAULT_CASH_CURRENCY
+    return f"{currency} {format_cash_warehouse_number(value)}"
+
+
+def format_cash_warehouse_number(value):
+    """Signed Cash Warehouse number only (no currency), default 0."""
+    num = 0.0 if value is None or value == "" else float(value)
+    body = f"{int(num):,}" if float(num) == int(num) else f"{num:,.2f}"
+    if num > 0:
+        body = f"+{body}"
+    return body
+
+
+def _cash_warehouse_value(value):
+    """Normalize Amount/Cash Warehouse cell value; default 0."""
+    if value is None or value == "":
+        return 0.0
+    return float(value)
+
+
 def format_payment_excel_lines(payment_method):
     """每種付款方式一行，供 Excel 垂直列出。"""
     lines = []
@@ -92,7 +118,8 @@ def format_payment_method_display(payment_method):
 
 
 def _format_amount(value, currency=None):
-    return format_money(value, currency)
+    """Amount column writes Cash Warehouse signed values (default 0)."""
+    return format_cash_warehouse_amount(value, currency)
 
 
 EXCHANGE_LABEL = "對換  (Exchange) "
@@ -112,7 +139,7 @@ def _notes_col(layout, customer_notes_col):
 def _write_item_block(
     ws, start_row, items, has_amount=True,
     write_stock=False, source=None, destination=None,
-    currency=None,
+    currency=None, transaction_type=None,
 ):
     """Write line items starting at start_row. Each item uses 2+ rows (gram + optional tael/oz)."""
     currency = currency or DEFAULT_CASH_CURRENCY
@@ -123,10 +150,14 @@ def _write_item_block(
         ws.cell(row=row, column=6).value = _format_number(item.get("weight_gram"))
         ws.cell(row=row, column=7).value = "克 Gram "
         if item.get("unit_price") is not None:
-            ws.cell(row=row, column=9).value = format_money(item.get("unit_price"), currency)
-        if item.get("amount") is not None:
-            # Column K aligns with the narrow amount box on the A4 receipt form
-            ws.cell(row=row, column=11).value = _format_amount(item.get("amount"), currency)
+            # Store numeric unit price (currency is in col J)
+            ws.cell(row=row, column=9).value = float(item.get("unit_price"))
+        # Template: J = Currency (Total Foreign Currency), K = Amount / Cash Warehouse
+        if has_amount:
+            ws.cell(row=row, column=10).value = currency
+            ws.cell(row=row, column=11).value = signed_cash_warehouse_amount(
+                _cash_warehouse_value(item.get("amount")), transaction_type
+            )
         if write_stock and source:
             ws.cell(row=row, column=8).value = f"倉存存取 {source}"
 
@@ -233,6 +264,7 @@ def _fill_copy_section(
         "write_stock": is_company,
         "source": invoice_data.get("source_location") if is_company else None,
         "destination": invoice_data.get("destination_location") if is_company else None,
+        "transaction_type": invoice_data.get("transaction_type"),
     }
 
     next_row = _write_item_block(
@@ -259,13 +291,21 @@ def _fill_copy_section(
         ws.cell(row=notes_row, column=_notes_col(layout, customer_notes_col)).value = notes
 
     note_amount = invoice_data.get("note_amount")
+    # Currency = Total Foreign Currency (J); Cash Warehouse signed amount (K)
     currency = invoice_data.get("invoice_currency") or DEFAULT_CASH_CURRENCY
-    if note_amount:
-        ws.cell(row=notes_row, column=11).value = _format_amount(note_amount, currency)
-
-    total = invoice_data.get("total_amount")
-    if total is not None:
-        ws.cell(row=layout["total_row"], column=11).value = _format_amount(total, currency)
+    tx_type = invoice_data.get("transaction_type")
+    if has_amount:
+        ws.cell(row=notes_row, column=10).value = currency
+        ws.cell(row=notes_row, column=11).value = signed_cash_warehouse_amount(
+            _cash_warehouse_value(note_amount), tx_type
+        )
+        signed_total = invoice_data.get("cash_warehouse_amount")
+        if signed_total is None or signed_total == "":
+            signed_total = signed_cash_warehouse_amount(
+                _cash_warehouse_value(invoice_data.get("total_amount")), tx_type
+            )
+        ws.cell(row=layout["total_row"], column=10).value = currency
+        ws.cell(row=layout["total_row"], column=11).value = float(signed_total)
 
     _write_payment_section(ws, layout, invoice_data)
 
@@ -361,7 +401,33 @@ def generate_invoice_excel(invoice_data, main_items, exchange_items=None):
             del wb[name]
 
     wb.save(output_path)
-    return str(output_path)
+    return str(output_path.resolve())
+
+
+def resolve_invoice_excel_path(excel_path, invoice_no=None):
+    """Resolve stored excel_path (relative or absolute) to an existing file."""
+    candidates = []
+    if excel_path:
+        p = Path(str(excel_path).strip())
+        candidates.append(p)
+        candidates.append(OUTPUT_DIR / p.name)
+        if not p.is_absolute():
+            candidates.append(OUTPUT_DIR.parent / p)
+            candidates.append(OUTPUT_DIR.parent.parent / p)
+    if invoice_no:
+        candidates.append(OUTPUT_DIR / f"{invoice_no}.xlsx")
+    seen = set()
+    for cand in candidates:
+        try:
+            key = str(cand)
+            if key in seen:
+                continue
+            seen.add(key)
+            if cand.exists():
+                return str(cand.resolve())
+        except OSError:
+            continue
+    return None
 
 
 def compute_tael_from_gram(grams):

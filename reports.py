@@ -115,7 +115,8 @@ def _build_cash_report_df(session, start_date, end_date):
             "記錄類型": _movement_kind_label(getattr(m, "movement_kind", "normal")),
             "交易性質": m.transaction_type,
             "方向": "存入" if m.direction == "in" else "支出",
-            "金額": m.amount,
+            # Amount = Cash Warehouse signed value (default 0)
+            "金額": (m.amount or 0) if m.direction == "in" else -(m.amount or 0),
             "貨幣": m.currency or "HKD$",
             "倉庫": m.warehouse or "現金倉",
             "客戶": m.customer_name or "",
