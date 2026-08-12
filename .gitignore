@@ -11,3 +11,5 @@ logs/
 *.log
 
 *.bak
+scripts/_debug*
+scripts/__pycache__/

@@ -12,6 +12,13 @@ fi
 
 mkdir -p data output/invoices output/reports logs templates
 
+if [[ -f data/gevin.db ]]; then
+  echo "NOTE: data/gevin.db already exists on this host — existing invoices will be kept."
+  echo "      For a blank client install, remove data/ before first start (fresh clone has no DB)."
+else
+  echo "NOTE: no database yet — first start creates a clean SQLite with admin / admin123 only."
+fi
+
 if [[ ! -f templates/invoice_template.xlsx ]]; then
   echo "WARNING: templates/invoice_template.xlsx is missing."
 fi

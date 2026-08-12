@@ -60,7 +60,8 @@ def main():
     assert resolve_invoice_excel_path(path, "TESTFIX_P1")
 
     payload = m.load_review_page()
-    assert len(payload) == 9
+    # safe_summary, stock, movements, pick, invoice_no, preview, items, excel, pdf, msg
+    assert len(payload) == 10, len(payload)
 
     text = Path(db.__file__).read_text(encoding="utf-8")
     assert text.count('"inventory_movements": [') == 1

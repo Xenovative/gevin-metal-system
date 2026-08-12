@@ -14,3 +14,8 @@ logs
 *.md
 !README.md
 deploy
+scripts/_debug*
+scripts/__pycache__
+debug-*.log
+.env
+.env.*

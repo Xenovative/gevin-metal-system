@@ -25,6 +25,8 @@
 
 適用於要給區網多台裝置（iPad / 手機 / PC）使用的 Linux 主機。環境固定，較少 Python/venv 問題。
 
+**重要（客戶機乾淨安裝）：** GitHub 倉庫**不含**本機測試用的 SQLite／發票 mock 資料（`data/`、`output/` 已列入 `.gitignore` 與 `.dockerignore`）。在客戶 Linux 上 `git clone` 後第一次啟動會建立**空白**資料庫，只有預設 `admin` / `admin123`，不會帶入筆電上的假單據。
+
 ### 一鍵（需已安裝 Docker）
 
 ```bash
@@ -33,6 +35,12 @@ sudo usermod -aG docker "$USER"   # 登出再登入後生效；或暫時用 sudo
 git clone https://github.com/Xenovative/gevin-metal-system.git
 cd gevin-metal-system
 bash scripts/docker-run.sh
+```
+
+部署前可在伺服器上跑：
+
+```bash
+bash scripts/verify_linux_ready.sh
 ```
 
 或手動：
@@ -132,7 +140,7 @@ gevin-metal-system/
 
 ## A4 品牌紙列印檢查清單（操作員）
 
-列印真相：**Excel → 預印 A4 品牌收據紙**。系統產生的 PDF 是由**已填好的 Excel 直接匯出**（版面與 Excel 列印預覽一致），不再另外重畫收據。
+列印真相：**Excel → 預印 A4 品牌收據紙**（現場）。數位預覽／下載為 Perfect V2 PDF（由 Excel 儲存格產生）。
 
 1. 在「發票覆核」選單號 → 預覽 → **下載 Excel**（系統會依資料庫重新生成，確保與畫面一致）。
 2. 用 Excel / LibreOffice 開啟後選擇 **A4、直向、符合頁面（fit to page / 縮放至一頁）**。
