@@ -130,6 +130,28 @@ gevin-metal-system/
 └── data/
 ```
 
+## A4 品牌紙列印檢查清單（操作員）
+
+列印真相：**Excel → 預印 A4 品牌收據紙**。系統產生的 PDF 是由**已填好的 Excel 直接匯出**（版面與 Excel 列印預覽一致），不再另外重畫收據。
+
+1. 在「發票覆核」選單號 → 預覽 → **下載 Excel**（系統會依資料庫重新生成，確保與畫面一致）。
+2. 用 Excel / LibreOffice 開啟後選擇 **A4、直向、符合頁面（fit to page / 縮放至一頁）**。
+3. 印表機設定：**實際大小 / 符合可列印區域**（關閉「適合邊距」以外的額外縮放），邊距維持範本預設。
+4. 紙匣放入 **品牌 A4 收據紙**（上半客戶單、下半公司單；金滿堂／收據框已印好）。
+5. 試印一張：單號、客戶、貨品、金額（J=貨幣、K=現金倉正負數）、備註／合計／付款應對齊框線；Logo／標題帶不可被 Excel 字蓋住。
+6. 貨品過多時畫面會警告，Excel 只印得下的項次，以免蓋住備註／合計區。
+
+自動檢查：
+- `python scripts/print_alignment_test.py`（Excel 儲存格／A4）
+- `python scripts/excel_pdf_parity_test.py`（Excel 儲存格＋Perfect V2 數位 PDF 內容一致）
+
+### 數位 PDF（Perfect V2）vs 現場列印
+
+- **數位 PDF**：以 Excel 儲存格為準（`receipt_model`），用 `assets/receipt_header.png` 作雙聯 A4 收據（客戶單／裁切線／公司單）。金額顯示 `HKD$ 0.00`；客戶單經手人 `XXXX`、公司單為實際經手人；庫存欄不併入貨品名稱。
+- **現場列印**：仍用 Excel 印在預印品牌 A4 紙上（勿依賴數位 PDF 當紙本）。
+
+若 Perfect V2 產生失敗，會退回 LibreOffice／Excel COM 把工作簿轉成 PDF（可選）。
+
 ## 相依套件
 
-見 `requirements.txt`（gradio / openpyxl / sqlalchemy / pandas）。請在 Linux 上建立新的 `.venv`，勿複製其他系統的虛擬環境。
+見 `requirements.txt`（gradio / openpyxl / sqlalchemy / pandas / reportlab / pypdf）。請在 Linux 上建立新的 `.venv`，勿複製其他系統的虛擬環境。

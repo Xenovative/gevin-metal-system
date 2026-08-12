@@ -12,7 +12,9 @@ find "$ROOT_DIR" -name '.DS_Store' -not -path '*/.git/*' -delete 2>/dev/null || 
 echo "==> Installing Ubuntu/Debian system packages..."
 if command -v apt-get >/dev/null 2>&1; then
   sudo apt-get update
-  sudo apt-get install -y git python3 python3-venv python3-pip
+  sudo apt-get install -y \
+    git python3 python3-venv python3-pip \
+    libreoffice-calc-nogui fonts-noto-cjk
 else
   echo "WARNING: apt-get not found. Ensure python3 + venv + pip are installed." >&2
 fi

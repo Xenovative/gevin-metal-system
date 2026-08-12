@@ -1,19 +1,31 @@
 import json
+import logging
 import shutil
+import sys
 from datetime import date, datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 import openpyxl
 from openpyxl.worksheet.page import PageMargins
 from openpyxl.worksheet.properties import PageSetupProperties
 
-from config import DEFAULT_CASH_CURRENCY, GRAMS_PER_TAEL, OUTPUT_DIR, TEMPLATE_PATH, TRANSACTION_TYPES
+from config import (
+    DEFAULT_CASH_CURRENCY,
+    GRAMS_PER_TAEL,
+    OUTPUT_DIR,
+    TEMPLATE_PATH,
+    TRANSACTION_TYPES,
+)
 from cash import signed_cash_warehouse_amount
 
-# 客戶單（上半部）與公司單（下半部）列號對照
-# Row heights in templates/invoice_template.xlsx leave top/mid spacers so
-# printed data sits in the blank frames of the A4 pre-printed 收據 form
-# (branding/logo at top of each half must not be overwritten).
+# Locked cell maps for A4 pre-printed brand paper (do not drift without remeasure).
+# Customer copy (top) / company copy = row + COMPANY_COPY_OFFSET:
+#   invoice no → K{invoice_no_row}; customer → E{info_row}; phone(company) → G{info_row};
+#   date → K{info_row}; items C/E/F/G/I from items_start; amounts J=currency K=signed;
+#   notes → notes_row; total → J/K{total_row}; payments → C{payment_row..+3}; handler → F{payment_row}.
+# Brand clear: rows 3 / 30 (titles must not overwrite 金滿堂 / 收據).
 CUSTOMER_COPY = {
     "invoice_no_row": 4,
     "info_row": 6,
@@ -25,6 +37,71 @@ CUSTOMER_COPY = {
 COMPANY_COPY_OFFSET = 27  # 公司單 = 客戶單列號 + 27
 PAYMENT_LINE_ROWS = 4
 PRINT_AREA = "A1:K54"
+BRAND_CLEAR_ROWS = (3, 30)
+# Item rows available before notes: notes_row - items_start (= 8).
+
+
+def estimate_item_rows(item):
+    """Rows consumed by one line item (matches _write_item_block)."""
+    rows = 2  # gram line + always advance
+    if item.get("weight_oz") is not None:
+        rows += 1
+    return rows
+
+
+def estimate_items_block_rows(main_items, exchange_items=None):
+    """Total rows needed for main (+ optional exchange label + exchange items)."""
+    total = sum(estimate_item_rows(it) for it in (main_items or []))
+    if exchange_items:
+        total += 1  # 對換 label
+        total += sum(estimate_item_rows(it) for it in exchange_items)
+    return total
+
+
+def fit_items_for_print(main_items, exchange_items=None, max_rows=None):
+    """
+    Clamp items so they fit above the notes row on the A4 form.
+    Returns (main, exchange, warning_or_None).
+    """
+    if max_rows is None:
+        max_rows = CUSTOMER_COPY["notes_row"] - CUSTOMER_COPY["items_start"]
+    main_items = list(main_items or [])
+    exchange_items = list(exchange_items or []) if exchange_items else []
+
+    def fits(m, e):
+        return estimate_items_block_rows(m, e or None) <= max_rows
+
+    if fits(main_items, exchange_items):
+        return main_items, exchange_items or None, None
+
+    # Drop exchange first, then trim main from the end
+    warning_parts = []
+    trimmed_ex = list(exchange_items)
+    while trimmed_ex and not fits(main_items, trimmed_ex):
+        trimmed_ex.pop()
+    if len(trimmed_ex) < len(exchange_items):
+        warning_parts.append(
+            f"對換貨品過多，列印僅顯示前 {len(trimmed_ex)} 項（其餘略過以免蓋住備註／合計）"
+        )
+
+    trimmed_main = list(main_items)
+    while trimmed_main and not fits(trimmed_main, trimmed_ex):
+        trimmed_main.pop()
+    if len(trimmed_main) < len(main_items):
+        warning_parts.append(
+            f"貨品過多，列印僅顯示前 {len(trimmed_main)} 項（其餘略過以免蓋住備註／合計）"
+        )
+
+    if not trimmed_main and main_items:
+        # Keep at least first item truncated to gram-only to avoid empty invoice
+        first = dict(main_items[0])
+        first["weight_tael"] = None
+        first["weight_oz"] = None
+        trimmed_main = [first]
+        warning_parts.append("貨品過多，列印僅保留第 1 項重量(克)")
+
+    warning = "；".join(warning_parts) if warning_parts else None
+    return trimmed_main, (trimmed_ex or None), warning
 
 
 def _format_number(value):
@@ -139,12 +216,15 @@ def _notes_col(layout, customer_notes_col):
 def _write_item_block(
     ws, start_row, items, has_amount=True,
     write_stock=False, source=None, destination=None,
-    currency=None, transaction_type=None,
+    currency=None, transaction_type=None, stop_before_row=None,
 ):
     """Write line items starting at start_row. Each item uses 2+ rows (gram + optional tael/oz)."""
     currency = currency or DEFAULT_CASH_CURRENCY
     row = start_row
     for item in items:
+        need = estimate_item_rows(item)
+        if stop_before_row is not None and row + need > stop_before_row:
+            break
         ws.cell(row=row, column=3).value = item.get("item_type", "")
         ws.cell(row=row, column=5).value = item.get("quality", "")
         ws.cell(row=row, column=6).value = _format_number(item.get("weight_gram"))
@@ -159,18 +239,20 @@ def _write_item_block(
                 _cash_warehouse_value(item.get("amount")), transaction_type
             )
         if write_stock and source:
-            ws.cell(row=row, column=8).value = f"倉存存取 {source}"
+            ws.cell(row=row, column=8).value = source
 
         row += 1
         if item.get("weight_tael") is not None:
             ws.cell(row=row, column=6).value = _format_number(item.get("weight_tael"))
-            ws.cell(row=row, column=7).value = "両 Teal"
+            ws.cell(row=row, column=7).value = "両 Tael"
             if item.get("unit_price_note"):
                 ws.cell(row=row, column=9).value = item.get("unit_price_note")
             if write_stock and destination:
-                ws.cell(row=row, column=8).value = f"倉存位置 {destination}"
+                ws.cell(row=row, column=8).value = destination
         row += 1
         if item.get("weight_oz") is not None:
+            if stop_before_row is not None and row >= stop_before_row:
+                break
             ws.cell(row=row, column=6).value = _format_number(item.get("weight_oz"))
             ws.cell(row=row, column=7).value = "安士 oz"
             row += 1
@@ -223,7 +305,20 @@ def _clear_section_data(ws, layout):
         row = payment_row + offset
         ws.cell(row=row, column=3).value = None
         # Do not clear column 5 — template already has print/goods checkboxes there
-    ws.cell(row=payment_row, column=6).value = None
+    # Clear handler band + template placeholders (XXXX / Admin / Handled-by label row)
+    for offset in range(0, PAYMENT_LINE_ROWS + 1):
+        row = payment_row + offset
+        val = ws.cell(row=row, column=6).value
+        if val is None:
+            continue
+        text = str(val)
+        if (
+            offset == 0
+            or text.strip() in ("XXXX", "Admin", "xxxx")
+            or "Handled by" in text
+            or "經手人" in text
+        ):
+            ws.cell(row=row, column=6).value = None
 
 
 def _write_payment_section(ws, layout, invoice_data):
@@ -233,9 +328,12 @@ def _write_payment_section(ws, layout, invoice_data):
     for idx, line in enumerate(lines[:PAYMENT_LINE_ROWS]):
         ws.cell(row=payment_row + idx, column=3).value = line
 
-    handler = invoice_data.get("handler", "")
-    if handler:
-        ws.cell(row=payment_row, column=6).value = handler
+    # Customer copy: placeholder XXXX; company copy: real handler (e.g. Admin)
+    if _is_company_copy(layout):
+        handler = (invoice_data.get("handler") or "").strip() or "Admin"
+    else:
+        handler = "XXXX"
+    ws.cell(row=payment_row, column=6).value = handler
 
 
 def _fill_copy_section(
@@ -245,14 +343,13 @@ def _fill_copy_section(
     has_amount = tx_config.get("has_amount", True)
     has_exchange = tx_config.get("has_exchange", False)
 
-    # Col K matches invoice no / date / amount boxes on the pre-printed form
-    ws.cell(row=layout["invoice_no_row"], column=11).value = (
-        f"{number_label} {invoice_data['invoice_no']}"
-        if not str(number_label).endswith(" ")
-        else f"{number_label}{invoice_data['invoice_no']}"
-    )
+    # Col K = value only (brand paper already prints Invoice No. / Date labels)
+    ws.cell(row=layout["invoice_no_row"], column=11).value = invoice_data["invoice_no"]
     ws.cell(row=layout["info_row"], column=5).value = invoice_data["customer_name"]
-    ws.cell(row=layout["info_row"], column=11).value = tx_date
+    if hasattr(tx_date, "strftime"):
+        ws.cell(row=layout["info_row"], column=11).value = tx_date.strftime("%Y-%m-%d")
+    else:
+        ws.cell(row=layout["info_row"], column=11).value = str(tx_date)[:10]
 
     _clear_section_data(ws, layout)
 
@@ -265,6 +362,7 @@ def _fill_copy_section(
         "source": invoice_data.get("source_location") if is_company else None,
         "destination": invoice_data.get("destination_location") if is_company else None,
         "transaction_type": invoice_data.get("transaction_type"),
+        "stop_before_row": layout["notes_row"],
     }
 
     next_row = _write_item_block(
@@ -278,11 +376,12 @@ def _fill_copy_section(
         )
         if label_row is None:
             label_row = min(next_row, layout["notes_row"] - 3)
+        if label_row < layout["notes_row"]:
             ws.cell(row=label_row, column=3).value = EXCHANGE_LABEL
-        _write_item_block(
-            ws, label_row + 1, exchange_items, has_amount=has_amount,
-            currency=invoice_data.get("invoice_currency"), **stock_kwargs,
-        )
+            _write_item_block(
+                ws, label_row + 1, exchange_items, has_amount=has_amount,
+                currency=invoice_data.get("invoice_currency"), **stock_kwargs,
+            )
 
     notes = invoice_data.get("notes", "")
     notes_row = layout["notes_row"]
@@ -316,7 +415,7 @@ def _company_layout():
 
 def _apply_a4_print_layout(ws):
     """Force A4 single-page print so Excel data aligns with pre-printed branding."""
-    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.paperSize = int(ws.PAPERSIZE_A4)
     ws.page_setup.orientation = "portrait"
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 1
@@ -330,7 +429,7 @@ def _apply_a4_print_layout(ws):
     ws.print_area = PRINT_AREA
 
     # Do not print Excel titles over pre-printed 收據 / logo band
-    for row in (3, 30):
+    for row in BRAND_CLEAR_ROWS:
         for col in (9, 10, 11):
             cell = ws.cell(row=row, column=col)
             if not cell.value:
@@ -361,10 +460,19 @@ def generate_invoice_excel(invoice_data, main_items, exchange_items=None):
     Fills both 客戶單 (top) and 公司單 (bottom, rows ~29-54) sections.
     Layout is tuned so values fall inside the blank frames of the A4
     pre-printed company receipt paper (no overlap with logo/branding).
+
+    Clamps items that would overflow into the notes/total band; sets
+    invoice_data['print_warning'] when truncation occurs.
     """
     tx_type = invoice_data["transaction_type"]
     tx_config = TRANSACTION_TYPES[tx_type]
     sheet_name = tx_config["sheet"]
+
+    main_items, exchange_items, overflow_warning = fit_items_for_print(
+        main_items, exchange_items
+    )
+    if overflow_warning:
+        invoice_data["print_warning"] = overflow_warning
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = OUTPUT_DIR / f"{invoice_data['invoice_no']}.xlsx"
@@ -401,7 +509,33 @@ def generate_invoice_excel(invoice_data, main_items, exchange_items=None):
             del wb[name]
 
     wb.save(output_path)
-    return str(output_path.resolve())
+    excel_abs = str(output_path.resolve())
+    logger.info("Invoice Excel saved: %s", excel_abs)
+    try:
+        from receipt_pdf import build_invoice_pdf_from_excel
+
+        pdf_abs = build_invoice_pdf_from_excel(excel_abs)
+        invoice_data["pdf_path"] = Path(pdf_abs).name
+        logger.info("Invoice brand PDF from Excel cells: %s", pdf_abs)
+    except Exception as exc:
+        logger.warning(
+            "Brand PDF overlay failed for %s (%s); trying Excel→PDF convert",
+            excel_abs, exc,
+        )
+        try:
+            from excel_to_pdf import export_excel_to_pdf
+
+            pdf_abs = export_excel_to_pdf(excel_abs)
+            invoice_data["pdf_path"] = Path(pdf_abs).name
+            logger.info("Invoice PDF fallback (workbook convert): %s", pdf_abs)
+        except Exception as exc2:
+            invoice_data.pop("pdf_path", None)
+            logger.exception("PDF export skipped for %s", excel_abs)
+            print(
+                f"[invoice_generator] PDF export skipped: {exc}; fallback: {exc2}",
+                file=sys.stderr,
+            )
+    return excel_abs
 
 
 def resolve_invoice_excel_path(excel_path, invoice_no=None):
@@ -434,3 +568,5 @@ def compute_tael_from_gram(grams):
     if grams is None or grams == "":
         return None
     return round(float(grams) / GRAMS_PER_TAEL, 3)
+
+

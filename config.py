@@ -3,6 +3,7 @@ from pathlib import Path
 # Resolve to absolute paths so the app works regardless of cwd (systemd, nohup, etc.)
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = BASE_DIR / "templates" / "invoice_template.xlsx"
+BRAND_PDF_PATH = BASE_DIR / "assets" / "Invoice_Template.pdf"
 OUTPUT_DIR = BASE_DIR / "output" / "invoices"
 REPORT_DIR = BASE_DIR / "output" / "reports"
 DB_PATH = BASE_DIR / "data" / "gevin.db"
@@ -25,7 +26,7 @@ ITEM_TYPES = [
 
 QUALITY_OPTIONS = ["足金", "24K", "24k", "18K", "9.997", "其他", "按資料"]
 
-UNITS = ["克 Gram", "両 Teal"]
+UNITS = ["克 Gram", "両 Tael"]
 
 PAYMENT_METHODS = ["現金 Cash", "轉帳 Transfer", "支票 Cheque", "其他 Other"]
 CASH_PAYMENT_METHOD = "現金 Cash"

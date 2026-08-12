@@ -30,6 +30,7 @@ import gradio as gr
 import pandas as pd
 
 from config import (
+    BASE_DIR,
     CASH_CURRENCIES,
     CASH_PAYMENT_METHOD,
     DEFAULT_CASH_CURRENCY,
@@ -629,6 +630,11 @@ def submit_invoice(
             cash_line = (
                 f"現金倉：{format_cash_warehouse_amount(signed, cash_movement.get('currency') or invoice_currency)}\n"
             )
+        try:
+            snapshot = _inventory_snapshot_text()
+        except Exception:
+            logger.exception("Inventory snapshot failed after create")
+            snapshot = "【倉存已寫入資料庫；請開啟發票查閱查看各倉庫總額】"
         msg = (
             f"✅ 發票已成功生成！\n"
             f"單號：{invoice_no}\n"
@@ -643,8 +649,11 @@ def submit_invoice(
                 if payment_json else ""
             )
             + cash_line
-            + f"檔案：{excel_path}"
+            + f"檔案：{excel_path}\n"
+            + snapshot
         )
+        if invoice_data.get("print_warning"):
+            msg += f"\n⚠️ {invoice_data['print_warning']}"
         return msg, excel_path, _items_to_table(main_items)
     except Exception as e:
         session.rollback()
@@ -695,23 +704,6 @@ def submit_and_refresh(
     )
 
 
-def refresh_review_after_submit(result_msg, current_user):
-    """After a successful create-invoice, reload Invoice Review tables."""
-    if isinstance(result_msg, str) and result_msg.startswith("✅"):
-        return run_load_inventory_page(current_user)
-    return (
-        gr.update(),
-        gr.update(),
-        gr.update(),
-        gr.update(),
-        gr.update(),
-        gr.update(),
-        gr.update(),
-        gr.update(),
-        gr.update(),
-    )
-
-
 def start_new_invoice(tx_type, tx_date):
     """開立新發票：重新分配單號並清空表單。"""
     invoice_no = get_next_invoice_number(session, tx_type, tx_date) if tx_type else ""
@@ -745,16 +737,82 @@ def _empty_review_items_df():
     return pd.DataFrame(columns=REVIEW_ITEMS_COLUMNS)
 
 
+def _refresh_db_view():
+    """Force a clean read of SQLite after writes from other Gradio threads."""
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+    try:
+        session.expire_all()
+    except Exception:
+        pass
+    # Drop thread-local session so the next query opens a fresh connection
+    try:
+        session.remove()
+    except Exception:
+        pass
+
+
+def _inventory_snapshot_text():
+    """Short SQL-backed warehouse totals for create-success feedback."""
+    from config import METAL_WAREHOUSES, SAFE_SUMMARY_CATEGORIES
+    from inventory import format_gram_display, get_safe_totals, get_unassigned_metal_totals
+
+    _refresh_db_view()
+    totals = get_safe_totals(session)
+    cash = get_cash_balances(session)
+    lines = ["【倉存已更新 Inventory Management】"]
+    for wh in METAL_WAREHOUSES:
+        parts = [
+            f"{cat} {format_gram_display(totals[wh][cat])}"
+            for cat in SAFE_SUMMARY_CATEGORIES
+            if abs(totals[wh][cat]) > 0.001
+        ]
+        if parts:
+            lines.append(f"  {wh}：{'｜'.join(parts)}")
+    if len(lines) == 1:
+        lines.append("  （各倉庫金屬合計目前為 0）")
+    unassigned = get_unassigned_metal_totals(session)
+    if unassigned:
+        ua = "｜".join(
+            f"{cat} {format_gram_display(g)}" for cat, g in unassigned.items()
+        )
+        lines.append(f"  未指定倉庫：{ua}")
+    if cash:
+        cash_bits = "｜".join(f"{cur} {amt:,.2f}" for cur, amt in cash.items())
+        lines.append(f"  現金倉：{cash_bits}")
+    return "\n".join(lines)
+
+
+def refresh_inventory_panels(current_user):
+    """Display-only refresh of Inventory Management (no invoice write)."""
+    err = require_view_inventory(current_user)
+    if err:
+        return f"<p>{err}</p>", gr.update(), gr.update()
+    _refresh_db_view()
+    now_text = datetime.now().strftime("目前時間：%Y年%m月%d日 %H:%M")
+    totals = get_safe_totals(session)
+    cash_balances = get_cash_balances(session)
+    unassigned = get_unassigned_metal_totals(session)
+    return (
+        build_safe_summary_html(totals, now_text, cash_balances, unassigned),
+        gr.update(value=load_stock()),
+        gr.update(value=load_movements()),
+    )
+
+
 def _empty_review_payload(message=""):
     return (
         f"<p>{message}</p>" if message else "<p></p>",
-        _empty_stock_df(),
-        _empty_movements_df(),
+        gr.update(value=_empty_stock_df()),
+        gr.update(value=_empty_movements_df()),
         gr.update(choices=[], value=None),
         "",
         "<p>請在步驟 3 輸入或選擇單號，再按「預覽」。</p>",
-        _empty_review_items_df(),
-        None,
+        gr.update(value=_empty_review_items_df()),
+        None,  # Excel
+        None,  # PDF
         message or "",
     )
 
@@ -768,23 +826,30 @@ def run_load_inventory_page(current_user):
 
 def load_review_page():
     """Invoice Review steps 1–2 data + recent order numbers for step 3."""
-    # Avoid stale SQLAlchemy identity-map reads across Gradio worker threads
-    session.expire_all()
+    _refresh_db_view()
     now_text = datetime.now().strftime("目前時間：%Y年%m月%d日 %H:%M")
     totals = get_safe_totals(session)
     cash_balances = get_cash_balances(session)
     unassigned = get_unassigned_metal_totals(session)
     nos = list_recent_invoice_nos()
-    count_msg = f"已載入 {len(nos)} 張近期發票、進出倉記錄已更新。"
+    stock_df = load_stock()
+    move_df = load_movements()
+    latest = nos[0] if nos else ""
+    count_msg = (
+        f"已載入 {len(nos)} 張近期發票、{len(move_df)} 筆進出倉記錄。"
+        + (f" 最新單號：{latest}" if latest else "")
+    )
+    # Use gr.update(value=...) so Gradio always refreshes Dataframes / Dropdown
     return (
         build_safe_summary_html(totals, now_text, cash_balances, unassigned),
-        load_stock(),
-        load_movements(),
-        gr.update(choices=nos, value=(nos[0] if nos else None)),
-        nos[0] if nos else "",
-        "<p>請在步驟 3 輸入或選擇單號，再按「預覽」。</p>",
-        _empty_review_items_df(),
-        None,
+        gr.update(value=stock_df),
+        gr.update(value=move_df),
+        gr.update(choices=nos, value=(latest or None)),
+        latest,
+        "<p>請在步驟 3 輸入或選擇單號，再按「預覽」。將顯示由 Excel 產生的 PDF 列印預覽。</p>",
+        gr.update(value=_empty_review_items_df()),
+        None,  # Excel
+        None,  # PDF
         f"✅ {count_msg}" if nos else "⚠️ 尚無發票資料。請先在「開立發票」建立單據後再刷新。",
     )
 
@@ -792,6 +857,7 @@ def load_review_page():
 def list_recent_invoice_nos(limit=80):
     from database import Invoice
 
+    _refresh_db_view()
     rows = (
         session.query(Invoice.invoice_no)
         .order_by(Invoice.id.desc())
@@ -803,7 +869,7 @@ def list_recent_invoice_nos(limit=80):
 
 def load_inventory_page():
     """Backward-compatible inventory-only payload (summary/stock/movements). """
-    session.expire_all()
+    _refresh_db_view()
     now_text = datetime.now().strftime("目前時間：%Y年%m月%d日 %H:%M")
     totals = get_safe_totals(session)
     cash_balances = get_cash_balances(session)
@@ -832,7 +898,6 @@ def load_stock():
 def load_movements():
     from database import InventoryMovement, Invoice
 
-    session.expire_all()
     records = (
         session.query(InventoryMovement)
         .order_by(InventoryMovement.movement_date.desc(), InventoryMovement.id.desc())
@@ -869,6 +934,12 @@ def load_movements():
     ])
 
 
+def refresh_review_after_submit(current_user):
+    """Always reload Invoice Review after create-invoice (tab may be hidden)."""
+    _refresh_db_view()
+    return run_load_inventory_page(current_user)
+
+
 def _fill_order_no_from_movement(evt: gr.SelectData, movement_df):
     """Step 2 → Step 3: clicking a movement row fills the order number."""
     if movement_df is None or getattr(movement_df, "empty", True):
@@ -876,7 +947,6 @@ def _fill_order_no_from_movement(evt: gr.SelectData, movement_df):
     try:
         row_idx = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
         invoice_no = str(movement_df.iloc[int(row_idx)]["單號"]).strip()
-        # Update textbox for preview; dropdown value only if already in choices
         return gr.update(), invoice_no
     except Exception:
         return gr.update(), gr.update()
@@ -884,16 +954,22 @@ def _fill_order_no_from_movement(evt: gr.SelectData, movement_df):
 
 def _pick_recent_invoice(selected_no):
     """Dropdown pick → fill order-number textbox."""
-    selected_no = (selected_no or "").strip()
-    return selected_no
+    return (selected_no or "").strip()
 
 
 def _on_main_tabs_select(evt: gr.SelectData, current_user):
     """Reload Invoice Review whenever that tab is opened."""
     label = str(getattr(evt, "value", "") or "")
-    if "Invoice Review" in label or "發票查閱" in label:
+    idx = getattr(evt, "index", None)
+    if (
+        "Invoice Review" in label
+        or "發票查閱" in label
+        or idx == 1
+    ):
+        logger.info("Invoice Review tab selected — reloading from DB")
         return run_load_inventory_page(current_user)
     return (
+        gr.update(),
         gr.update(),
         gr.update(),
         gr.update(),
@@ -906,14 +982,22 @@ def _on_main_tabs_select(evt: gr.SelectData, current_user):
     )
 
 def run_preview_invoice(invoice_no, current_user):
-    """Steps 4–5: preview invoice details and prepare Excel for print/download."""
+    """Steps 4–5: regenerate Excel+PDF, embed PDF preview, offer both downloads."""
     from database import Invoice, InvoiceLineItem
-    from invoice_generator import format_money, format_payment_method_display
+    from invoice_generator import generate_invoice_excel, resolve_invoice_excel_path
+    from invoice_preview import (
+        build_pdf_preview_html,
+        build_print_preview_html,
+        build_print_preview_html_from_excel,
+        lines_from_orm,
+    )
+    from cash import signed_cash_warehouse_amount
+    from config import OUTPUT_DIR, TRANSACTION_TYPES
 
     empty_items = _empty_review_items_df()
     err = require_view_inventory(current_user)
     if err:
-        return f"<p>{err}</p>", empty_items, None, err
+        return f"<p>{err}</p>", empty_items, None, None, err
 
     invoice_no = (invoice_no or "").strip()
     if not invoice_no:
@@ -921,15 +1005,17 @@ def run_preview_invoice(invoice_no, current_user):
             "<p>❌ 請先輸入或選擇單號</p>",
             empty_items,
             None,
+            None,
             "❌ 請先輸入或選擇單號",
         )
 
-    session.expire_all()
+    _refresh_db_view()
     invoice = session.query(Invoice).filter(Invoice.invoice_no == invoice_no).first()
     if not invoice:
         return (
             f"<p>❌ 找不到單號「{invoice_no}」</p>",
             empty_items,
+            None,
             None,
             f"❌ 找不到單號「{invoice_no}」",
         )
@@ -940,6 +1026,7 @@ def run_preview_invoice(invoice_no, current_user):
         .order_by(InvoiceLineItem.sort_order, InvoiceLineItem.id)
         .all()
     )
+    line_dicts = lines_from_orm(lines)
     currency = invoice.invoice_currency or "HKD$"
     items_df = pd.DataFrame([
         {
@@ -954,33 +1041,100 @@ def run_preview_invoice(invoice_no, current_user):
         for line in lines
     ]) if lines else empty_items
 
-    status = _invoice_status_label(invoice.status or "active")
-    payment_text = format_payment_method_display(invoice.payment_method or "")
-    preview_html = f"""
-    <div style="line-height:1.6">
-      <h3>步驟 4 — 發票預覽</h3>
-      <p><b>單號：</b>{invoice.invoice_no} &nbsp; <b>狀態：</b>{status}</p>
-      <p><b>交易性質：</b>{invoice.transaction_type}
-         &nbsp; <b>日期：</b>{invoice.transaction_date.strftime('%Y-%m-%d') if invoice.transaction_date else ''}</p>
-      <p><b>客戶：</b>{invoice.customer_name or ''}
-         &nbsp; <b>電話：</b>{invoice.customer_phone or ''}</p>
-      <p><b>經手人：</b>{invoice.handler or ''}</p>
-      <p><b>倉存存取：</b>{invoice.source_location or ''}
-         → <b>倉存位置：</b>{invoice.destination_location or ''}</p>
-      <p><b>付款方式：</b>{payment_text or '—'}</p>
-      <p><b>合計：</b>{format_money(invoice.total_amount, currency) if invoice.total_amount is not None else '—'}</p>
-      <p><b>備註：</b>{(invoice.notes or '—').replace(chr(10), '<br>')}</p>
-    </div>
-    """
+    # 1) Always regenerate Excel first (also builds Perfect V2 PDF)
+    print_file = None
+    pdf_file = None
+    excel_error = None
+    invoice_data = {
+        "invoice_no": invoice.invoice_no,
+        "transaction_type": invoice.transaction_type,
+        "customer_name": invoice.customer_name or "",
+        "customer_phone": invoice.customer_phone or "",
+        "transaction_date": invoice.transaction_date,
+        "handler": invoice.handler or "",
+        "payment_method": invoice.payment_method or "",
+        "invoice_currency": currency,
+        "source_location": invoice.source_location or "",
+        "destination_location": invoice.destination_location or "",
+        "notes": invoice.notes or "",
+        "note_amount": invoice.note_amount if invoice.note_amount is not None else 0,
+        "total_amount": invoice.total_amount if invoice.total_amount is not None else 0,
+        "cash_warehouse_amount": signed_cash_warehouse_amount(
+            invoice.total_amount if invoice.total_amount is not None else 0,
+            invoice.transaction_type,
+        ),
+    }
+    try:
+        main_items = [d for d in line_dicts if d.get("section") != "exchange"]
+        exchange_items = [d for d in line_dicts if d.get("section") == "exchange"]
+        abs_path = generate_invoice_excel(
+            invoice_data, main_items, exchange_items or None
+        )
+        invoice.excel_path = Path(abs_path).name
+        session.commit()
+        print_file = abs_path
+    except Exception as exc:
+        logger.exception("Failed to regenerate Excel for %s", invoice_no)
+        excel_error = exc
+        print_file = resolve_invoice_excel_path(
+            invoice.excel_path or "", invoice.invoice_no
+        )
 
-    excel_path = (invoice.excel_path or "").strip()
-    print_file = resolve_invoice_excel_path(excel_path, invoice.invoice_no)
     if print_file:
-        msg = f"✅ 已載入 {invoice_no}。請於步驟 5 下載 Excel，用 A4 品牌收據紙列印。"
-    else:
+        candidate = Path(print_file).with_suffix(".pdf")
+        if candidate.exists():
+            pdf_file = str(candidate.resolve())
+        elif invoice_data.get("pdf_path"):
+            alt = OUTPUT_DIR / Path(invoice_data["pdf_path"]).name
+            if alt.exists():
+                pdf_file = str(alt.resolve())
+
+    # 2) Primary preview = embedded PDF; HTML Excel mock only as fallback
+    tx_config = TRANSACTION_TYPES.get(invoice.transaction_type or "", {})
+    number_label = tx_config.get("number_label", "Invoice No.")
+    status = "已作廢" if (invoice.status or "") == "voided" else "正常"
+    excel_name = Path(print_file).name if print_file else ""
+
+    if pdf_file and Path(pdf_file).exists():
+        preview_html = build_pdf_preview_html(
+            pdf_file,
+            invoice_no=invoice_no,
+            tx_type=invoice.transaction_type or "",
+            status=status,
+            excel_name=excel_name,
+        )
         msg = (
-            f"⚠️ 已載入 {invoice_no} 預覽，但找不到 Excel 檔案"
-            f"{f'（{excel_path}）' if excel_path else ''}，無法列印下載。"
+            f"✅ 已載入 {invoice_no} PDF 列印預覽（由 Excel {excel_name} 產生）。"
+            " 步驟 5 可下載 Excel（品牌紙列印）與 PDF。"
+        )
+        if invoice_data.get("print_warning"):
+            msg += f"\n⚠️ {invoice_data['print_warning']}"
+        if excel_error:
+            msg = (
+                f"⚠️ Excel 重新生成失敗（{excel_error}）；"
+                f"已顯示既有 PDF：{Path(pdf_file).name}"
+            )
+    elif print_file and Path(print_file).exists():
+        try:
+            preview_html = build_print_preview_html_from_excel(
+                print_file,
+                tx_type=invoice.transaction_type or "",
+                status=status,
+                number_label=number_label,
+            )
+            msg = (
+                f"⚠️ PDF 尚未產生，已改用 Excel 畫面預覽（{excel_name}）。"
+                " 請再按一次預覽，或檢查字型／receipt_header.png。"
+            )
+        except Exception as exc:
+            logger.exception("Excel→preview failed for %s", invoice_no)
+            preview_html = build_print_preview_html(invoice, line_dicts)
+            msg = f"⚠️ PDF/Excel 預覽失敗，已改用資料庫預覽：{exc}"
+    else:
+        preview_html = build_print_preview_html(invoice, line_dicts)
+        msg = (
+            f"⚠️ 找不到 Excel／PDF 列印檔，已用資料庫預覽。"
+            + (f" 生成錯誤：{excel_error}" if excel_error else "")
         )
 
     log_audit(
@@ -989,14 +1143,14 @@ def run_preview_invoice(invoice_no, current_user):
         "preview_invoice",
         target_type="invoice",
         target_id=invoice_no,
-        details="Invoice Review preview",
+        details="Invoice Review PDF print preview",
     )
     try:
         session.commit()
     except Exception:
         session.rollback()
 
-    return preview_html, items_df, print_file, msg
+    return preview_html, items_df, print_file, pdf_file, msg
 
 
 def run_daily_report(current_user):
@@ -1313,7 +1467,8 @@ def build_app():
                 with gr.Tab("🔎 發票查閱 Invoice Review", visible=False) as inventory_tab:
                     gr.Markdown(
                         "依序操作：**1 倉存管理 → 2 進出倉記錄 → 3 單號 → 4 預覽 → 5 列印**\n\n"
-                        "開立發票後請按 **🔄 刷新**，或重新點開本分頁以載入最新資料。"
+                        "在「開立發票」按 **生成發票 Excel** 後，本頁 **各倉庫總額／進出倉** 會自動從資料庫更新；"
+                        "亦可按 **🔄 刷新** 或重新點開本分頁。"
                     )
 
                     gr.Markdown("### 1. Inventory Management（倉存管理）")
@@ -1335,7 +1490,7 @@ def build_app():
                         value=_empty_movements_df(),
                         interactive=True,
                     )
-                    refresh_btn = gr.Button("🔄 刷新倉存與記錄", variant="secondary")
+                    refresh_btn = gr.Button("🔄 刷新倉存與記錄（載入最新）", variant="primary")
 
                     gr.Markdown("### 3. Order Number（單號）")
                     with gr.Row():
@@ -1352,9 +1507,10 @@ def build_app():
                         )
                         preview_btn = gr.Button("4. 預覽 Preview", variant="primary")
 
-                    gr.Markdown("### 4. Preview（預覽）")
+                    gr.Markdown("### 4. Preview（PDF 列印預覽 — 由剛生成的 Excel 產生）")
                     review_preview = gr.HTML(
-                        value="<p>請在步驟 3 輸入或選擇單號，再按「預覽」。</p>"
+                        value="<p>請在步驟 3 選擇或輸入單號，再按「預覽」。"
+                        "將重新生成 Excel 與 PDF，並在此內嵌顯示 PDF（即將列印／匯出的內容）。</p>"
                     )
                     review_items_table = gr.Dataframe(
                         label="貨品明細",
@@ -1364,12 +1520,22 @@ def build_app():
                     )
                     review_msg = gr.Textbox(label="查閱狀態", interactive=False, lines=2)
 
-                    gr.Markdown("### 5. Print（列印）")
+                    gr.Markdown("### 5. Print（列印／下載）")
                     gr.Markdown(
-                        "下載 Excel 後，以 **A4 品牌收據紙** 列印（客戶單 + 公司單）。"
+                        "現場列印請下載 **Excel**，以 **A4 品牌收據紙** 列印。"
+                        " **PDF** 為數位收據預覽／存檔。"
                     )
-                    review_print_file = gr.File(label="下載／列印發票 Excel")
+                    with gr.Row():
+                        review_print_file = gr.File(label="下載／列印發票 Excel")
+                        review_pdf_file = gr.File(label="下載 PDF 收據")
 
+                    review_preview_outputs = [
+                        review_preview,
+                        review_items_table,
+                        review_print_file,
+                        review_pdf_file,
+                        review_msg,
+                    ]
                     review_outputs = [
                         safe_summary,
                         stock_table,
@@ -1379,14 +1545,49 @@ def build_app():
                         review_preview,
                         review_items_table,
                         review_print_file,
+                        review_pdf_file,
                         review_msg,
                     ]
+                    inventory_panel_outputs = [
+                        safe_summary,
+                        stock_table,
+                        movement_table,
+                    ]
+
+                    # Immediately after create+Excel: refresh Inventory Management from SQL
+                    submit_event.then(
+                        refresh_review_after_submit,
+                        [current_user],
+                        outputs=review_outputs,
+                    )
+
                     refresh_btn.click(
                         run_load_inventory_page,
                         current_user,
                         outputs=review_outputs,
+                    ).then(
+                        run_preview_invoice,
+                        [review_invoice_no, current_user],
+                        review_preview_outputs,
+                    ).then(
+                        refresh_inventory_panels,
+                        current_user,
+                        inventory_panel_outputs,
                     )
-                    # Single tab-select reload (avoid double-fire with inventory_tab.select)
+                    # Opening this tab always reloads latest DB + shows print preview of latest invoice
+                    inventory_tab.select(
+                        run_load_inventory_page,
+                        current_user,
+                        outputs=review_outputs,
+                    ).then(
+                        run_preview_invoice,
+                        [review_invoice_no, current_user],
+                        review_preview_outputs,
+                    ).then(
+                        refresh_inventory_panels,
+                        current_user,
+                        inventory_panel_outputs,
+                    )
                     main_tabs.select(
                         _on_main_tabs_select,
                         current_user,
@@ -1401,18 +1602,23 @@ def build_app():
                         _pick_recent_invoice,
                         review_invoice_pick,
                         review_invoice_no,
+                    ).then(
+                        run_preview_invoice,
+                        [review_invoice_no, current_user],
+                        review_preview_outputs,
+                    ).then(
+                        refresh_inventory_panels,
+                        current_user,
+                        inventory_panel_outputs,
                     )
                     preview_btn.click(
                         run_preview_invoice,
                         [review_invoice_no, current_user],
-                        [review_preview, review_items_table, review_print_file, review_msg],
-                    )
-
-                    # After invoice create succeeds, refresh Invoice Review from DB
-                    submit_event.then(
-                        refresh_review_after_submit,
-                        [result_msg, current_user],
-                        outputs=review_outputs,
+                        review_preview_outputs,
+                    ).then(
+                        refresh_inventory_panels,
+                        current_user,
+                        inventory_panel_outputs,
                     )
 
                 # ── Tab 3: 報表 ──
@@ -1537,7 +1743,12 @@ if __name__ == "__main__":
         "server_name": "0.0.0.0",
         "server_port": port,
         "share": False,
-        "allowed_paths": [str(OUTPUT_DIR), str(REPORT_DIR)],
+        "allowed_paths": [
+            str(OUTPUT_DIR),
+            str(REPORT_DIR),
+            str(BASE_DIR / "assets"),
+            str(BASE_DIR / "templates"),
+        ],
         "show_error": True,
         "strict_cors": False,
         "ssr_mode": False,
