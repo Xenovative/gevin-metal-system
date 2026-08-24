@@ -15,7 +15,12 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, scoped_session, sessionmaker
 
 from auth import ensure_default_admin
-from config import DB_PATH, INVOICE_STATUS_ACTIVE, ensure_runtime_dirs
+from config import (
+    DB_PATH,
+    INVOICE_STATUS_ACTIVE,
+    TRANSACTION_TYPE_RENAMES,
+    ensure_runtime_dirs,
+)
 
 Base = declarative_base()
 
@@ -60,7 +65,7 @@ class Invoice(Base):
     notes = Column(Text)
     note_amount = Column(Float, default=0)
     total_amount = Column(Float, default=0)
-    invoice_currency = Column(String(20), default="HKD$")
+    invoice_currency = Column(String(20), default="HKD")
     excel_path = Column(String(500))
     source_location = Column(String(50))
     destination_location = Column(String(50))
@@ -95,7 +100,7 @@ class CashMovement(Base):
     transaction_type = Column(String(50), nullable=False)
     direction = Column(String(10), nullable=False)  # in / out
     amount = Column(Float, default=0)
-    currency = Column(String(20), default="HKD$")
+    currency = Column(String(20), default="HKD")
     warehouse = Column(String(50), default="現金倉")
     movement_date = Column(Date, nullable=False)
     customer_name = Column(String(100))
@@ -103,6 +108,27 @@ class CashMovement(Base):
     notes = Column(Text)
     movement_kind = Column(String(20), default="normal")  # normal / reversal
     created_at = Column(DateTime, default=datetime.now)
+
+
+class CancelledInvoice(Base):
+    """Serial-number blocklist for cancelled orders.
+
+    Cancelled orders are deleted from the main tables and archived to
+    output/reports/cancelled_orders.xlsx; this table is the authoritative
+    record that keeps their serials from ever being re-issued.
+    """
+
+    __tablename__ = "cancelled_invoices"
+
+    id = Column(Integer, primary_key=True)
+    invoice_no = Column(String(50), unique=True, nullable=False)
+    transaction_type = Column(String(50))
+    customer_name = Column(String(100))
+    transaction_date = Column(Date)
+    total_amount = Column(Float)
+    invoice_currency = Column(String(20))
+    cancelled_by = Column(String(100))
+    cancelled_at = Column(DateTime, default=datetime.now)
 
 
 class InventoryMovement(Base):
@@ -182,6 +208,103 @@ def _migrate_db(engine):
                 "WHERE movement_kind IS NULL OR movement_kind = ''"
             ))
 
+        _migrate_transaction_types(conn, inspector)
+        _migrate_currency_codes(conn, inspector)
+        _migrate_voided_serials(conn, inspector)
+
+
+def _migrate_voided_serials(conn, inspector):
+    """Copy historical voided invoice numbers into the cancel blocklist.
+
+    Idempotent: skips serials already present. Raw SQL needs explicit
+    cancelled_at because Column Python defaults do not fire on text() inserts.
+    """
+    from sqlalchemy import inspect, text
+
+    tables = set(inspect(conn).get_table_names())
+    if not {"invoices", "cancelled_invoices"} <= tables:
+        return
+    voided = conn.execute(text(
+        "SELECT invoice_no, transaction_type, customer_name, transaction_date, "
+        "total_amount, invoice_currency FROM invoices WHERE status = 'voided'"
+    )).fetchall()
+    now = datetime.now()
+    for inv_no, tx_type, customer, tx_date, total, currency in voided:
+        exists = conn.execute(
+            text("SELECT 1 FROM cancelled_invoices WHERE invoice_no = :no"),
+            {"no": inv_no},
+        ).fetchone()
+        if exists:
+            continue
+        conn.execute(
+            text(
+                "INSERT INTO cancelled_invoices ("
+                "invoice_no, transaction_type, customer_name, transaction_date, "
+                "total_amount, invoice_currency, cancelled_by, cancelled_at"
+                ") VALUES ("
+                ":no, :tx_type, :customer, :tx_date, :total, :currency, "
+                ":by, :at)"
+            ),
+            {
+                "no": inv_no, "tx_type": tx_type, "customer": customer,
+                "tx_date": tx_date, "total": total, "currency": currency,
+                "by": "migration", "at": now,
+            },
+        )
+
+
+def _migrate_transaction_types(conn, inspector):
+    """Rename legacy transaction_type values to the new …單 keys."""
+    from sqlalchemy import text
+
+    tables = ["invoices", "inventory_movements", "cash_movements"]
+    for table in tables:
+        if table not in inspector.get_table_names():
+            continue
+        cols = {col["name"] for col in inspector.get_columns(table)}
+        if "transaction_type" not in cols:
+            continue
+        for old, new in TRANSACTION_TYPE_RENAMES.items():
+            conn.execute(
+                text(
+                    f"UPDATE {table} SET transaction_type = :new "
+                    "WHERE transaction_type = :old"
+                ),
+                {"new": new, "old": old},
+            )
+
+
+def _migrate_currency_codes(conn, inspector):
+    """Normalize stored currency to bare codes (HKD$ → HKD, CNY¥ → CNY, ...)."""
+    from sqlalchemy import text
+
+    targets = [
+        ("invoices", "invoice_currency"),
+        ("cash_movements", "currency"),
+    ]
+    for table, column in targets:
+        if table not in inspector.get_table_names():
+            continue
+        cols = {col["name"] for col in inspector.get_columns(table)}
+        if column not in cols:
+            continue
+        # Strip trailing currency symbols/whitespace, keep the leading code.
+        for symbol in ("$", "¥", "€", "£"):
+            conn.execute(
+                text(
+                    f"UPDATE {table} SET {column} = "
+                    f"REPLACE({column}, :sym, '') "
+                    f"WHERE {column} LIKE :pat"
+                ),
+                {"sym": symbol, "pat": f"%{symbol}"},
+            )
+        conn.execute(
+            text(
+                f"UPDATE {table} SET {column} = TRIM({column}) "
+                f"WHERE {column} IS NOT NULL"
+            )
+        )
+
 
 def init_db():
     ensure_runtime_dirs()
@@ -213,7 +336,7 @@ def save_invoice(session, invoice_data, line_items, movements, cash_movement=Non
         notes=invoice_data.get("notes", ""),
         note_amount=invoice_data.get("note_amount", 0),
         total_amount=invoice_data.get("total_amount") or 0,
-        invoice_currency=invoice_data.get("invoice_currency", "HKD$"),
+        invoice_currency=invoice_data.get("invoice_currency", "HKD"),
         excel_path=invoice_data.get("excel_path", ""),
         source_location=invoice_data.get("source_location", ""),
         destination_location=invoice_data.get("destination_location", ""),
@@ -258,8 +381,12 @@ def save_invoice(session, invoice_data, line_items, movements, cash_movement=Non
                 customer_name=invoice_data["customer_name"],
                 handler=invoice_data.get("handler", ""),
                 notes=movement.get("notes", ""),
-                source_location=invoice_data.get("source_location", ""),
-                destination_location=invoice_data.get("destination_location", ""),
+                source_location=movement.get(
+                    "source_location", invoice_data.get("source_location", "")
+                ),
+                destination_location=movement.get(
+                    "destination_location", invoice_data.get("destination_location", "")
+                ),
                 movement_kind="normal",
             )
         )
@@ -271,7 +398,7 @@ def save_invoice(session, invoice_data, line_items, movements, cash_movement=Non
                 transaction_type=cash_movement["transaction_type"],
                 direction=cash_movement["direction"],
                 amount=cash_movement["amount"],
-                currency=cash_movement.get("currency", "HKD$"),
+                currency=cash_movement.get("currency", "HKD"),
                 warehouse=cash_movement.get("warehouse", "現金倉"),
                 movement_date=cash_movement["movement_date"],
                 customer_name=cash_movement.get("customer_name", ""),

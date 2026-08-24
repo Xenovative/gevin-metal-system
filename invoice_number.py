@@ -50,15 +50,20 @@ def get_prefix(transaction_type: str) -> str:
 
 
 def get_next_invoice_number(session, transaction_type: str, tx_date) -> str:
-    """依前綴與交易日期，產生當月下一個單號。"""
+    """依前綴與交易日期，產生當月下一個單號。
+
+    Cancelled serials (cancelled_invoices blocklist) are never re-issued:
+    they count toward the monthly max even though the invoice row is gone.
+    """
     tx_date = parse_tx_date(tx_date)
     prefix = get_prefix(transaction_type)
 
-    from database import Invoice
+    from database import CancelledInvoice, Invoice
 
-    invoices = session.query(Invoice.invoice_no).all()
+    serials = [r[0] for r in session.query(Invoice.invoice_no).all()]
+    serials += [r[0] for r in session.query(CancelledInvoice.invoice_no).all()]
     max_seq = 0
-    for (invoice_no,) in invoices:
+    for invoice_no in serials:
         parsed = parse_invoice_number(invoice_no)
         if parsed and parsed["prefix"] == prefix:
             if parsed["year"] == tx_date.year and parsed["month"] == tx_date.month:
@@ -67,11 +72,21 @@ def get_next_invoice_number(session, transaction_type: str, tx_date) -> str:
     return format_invoice_number(prefix, tx_date.year, tx_date.month, max_seq + 1)
 
 
-def validate_invoice_number(invoice_no, transaction_type, tx_date):
-    """驗證單號格式是否正確，回傳錯誤訊息或 None。"""
+def validate_invoice_number(session, invoice_no, transaction_type, tx_date):
+    """驗證單號格式是否正確，回傳錯誤訊息或 None。已取消的單號不可重用。"""
     parsed = parse_invoice_number(invoice_no)
     if not parsed:
         return "單號格式錯誤，應為：前綴 + 年份(2位) + 月份(2位) + 流水號(5位)，例 S260300001"
+
+    from database import CancelledInvoice
+
+    blocked = (
+        session.query(CancelledInvoice)
+        .filter(CancelledInvoice.invoice_no == invoice_no.strip())
+        .first()
+    )
+    if blocked:
+        return f"單號 {invoice_no} 已取消，不可重用"
 
     expected_prefix = get_prefix(transaction_type)
     if parsed["prefix"] != expected_prefix:

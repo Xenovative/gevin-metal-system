@@ -125,15 +125,18 @@ def _val(text, fallback="—"):
 
 def _items_rows_html(copy: ReceiptCopy) -> str:
     rows = []
+    show_stock = copy.kind == "company"
     for ln in copy.lines:
         weights = "<br>".join(_esc(w) for w in ln.weight_lines) if ln.weight_lines else "—"
-        stock_bits = []
-        if copy.kind == "company":
+        stock_td = ""
+        if show_stock:
+            stock_bits = []
             if ln.stock_action:
                 stock_bits.append(_esc(ln.stock_action))
             if ln.stock_location:
                 stock_bits.append(_esc(ln.stock_location))
-        stock = "<br>".join(stock_bits) if stock_bits else ""
+            stock = "<br>".join(stock_bits) if stock_bits else "—"
+            stock_td = f"<td class='stock'><span class='val'>{stock}</span></td>"
         price = ln.unit_price if ln.unit_price != "" else "—"
         amt = ln.amount_display or "—"
         rows.append(
@@ -141,13 +144,14 @@ def _items_rows_html(copy: ReceiptCopy) -> str:
             f"<td><span class='val'>{_esc(ln.item_type) or '—'}</span></td>"
             f"<td><span class='val'>{_esc(ln.quality) or '—'}</span></td>"
             f"<td><span class='val'>{weights}</span></td>"
-            f"<td class='stock'><span class='val'>{stock or ('—' if copy.kind == 'company' else '')}</span></td>"
+            f"{stock_td}"
             f"<td class='num'><span class='val'>{_esc(price)}</span></td>"
             f"<td class='num'><span class='val'>{_esc(amt)}</span></td>"
             "</tr>"
         )
     if not rows:
-        rows.append('<tr><td colspan="6" class="muted">（Excel 無貨品列）</td></tr>')
+        span = 6 if show_stock else 5
+        rows.append(f'<tr><td colspan="{span}" class="muted">（Excel 無貨品列）</td></tr>')
     return "\n".join(rows)
 
 
@@ -158,7 +162,7 @@ def _copy_panel_html(copy: ReceiptCopy, number_label: str = "Invoice No.") -> st
     pay_html = (
         "<br>".join(_esc(p) for p in copy.payment_lines) if copy.payment_lines else "—"
     )
-    stock_th = "庫存 Stock" if copy.kind == "company" else ""
+    stock_th = "<th>庫存 Stock</th>" if copy.kind == "company" else ""
     title = (
         "公司單 Company Copy" if copy.kind == "company" else "客戶單 Customer Copy"
     )
@@ -182,10 +186,10 @@ def _copy_panel_html(copy: ReceiptCopy, number_label: str = "Invoice No.") -> st
             <tr>
               <th>貨品 Item</th>
               <th>成色 Quality</th>
-              <th>重量 Gross</th>
-              <th>{stock_th}</th>
-              <th>單價 Unit</th>
-              <th>現金倉 Amount</th>
+              <th>重量 Weight</th>
+              {stock_th}
+              <th class="num">單價 Unit ($)</th>
+              <th class="num">現金倉 Cash Warehouse</th>
             </tr>
           </thead>
           <tbody>
@@ -206,7 +210,7 @@ def _copy_panel_html(copy: ReceiptCopy, number_label: str = "Invoice No.") -> st
           </div>
           <div class="total-box">
             <div class="lbl">合計 Total / Foreign Currency</div>
-            <div class="total-amt">{_val(copy.total_display, "HKD$ 0.00")}</div>
+            <div class="total-amt">{_val(copy.total_display, "HKD 0.00")}</div>
             <div class="copy-tag">{_esc(title)}</div>
           </div>
         </div>
@@ -305,7 +309,7 @@ table.items th {{
   color:#5a4530; font-weight:700; text-align:left; font-size:10px;
   border-bottom: 1.5px solid rgba(120,100,70,.5);
 }}
-table.items td.num, table.items th:nth-child(5), table.items th:nth-child(6) {{ text-align:right; }}
+table.items td.num, table.items th.num {{ text-align:right; }}
 table.items td.stock {{ font-size:10px; max-width:110px; }}
 .footer-grid {{
   display:grid; grid-template-columns: 1.2fr 1fr 0.9fr; gap:6px; margin-top:4px; font-size:11px;
@@ -352,7 +356,7 @@ def build_print_preview_html(invoice, line_dicts):
     Legacy entry: prefer Excel path via build_print_preview_html_from_excel.
     Falls back to reconstructing a document from ORM-ish fields (less accurate).
     """
-    from receipt_model import ReceiptLine, ReceiptCopy, ReceiptDocument, CUSTOMER_HANDLER
+    from receipt_model import ReceiptLine, ReceiptCopy, ReceiptDocument
     from invoice_generator import format_payment_excel_lines
     from config import TRANSACTION_TYPES, DEFAULT_CASH_CURRENCY
     from receipt_model import _fmt_money, _fmt_weight_line, _fmt_price, _fmt_date
@@ -411,7 +415,7 @@ def build_print_preview_html(invoice, line_dicts):
             lines=lines(False),
             notes=notes,
             total_display=total_disp,
-            handler=CUSTOMER_HANDLER,
+            handler=handler or "Admin",
             payment_lines=payments,
         ),
         company=ReceiptCopy(

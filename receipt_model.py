@@ -13,17 +13,27 @@ from typing import Any, Optional
 
 import openpyxl
 
-# Keep in sync with invoice_generator.CUSTOMER_COPY
+from config import TRANSACTION_TYPES
+
+# Keep in sync with invoice_excel_generator.CUSTOMER_COPY / COMPANY_COPY
 CUSTOMER_COPY = {
-    "invoice_no_row": 4,
-    "info_row": 6,
-    "items_start": 11,
-    "notes_row": 19,
-    "total_row": 22,
-    "payment_row": 23,
+    "invoice_no_row": 3,
+    "info_row": 5,
+    "items_start": 10,
+    "notes_row": 18,
+    "total_row": 21,
+    "payment_row": 22,
+    "handler_row": 24,
 }
-COMPANY_COPY_OFFSET = 27
-CUSTOMER_HANDLER = "XXXX"
+COMPANY_COPY = {
+    "invoice_no_row": 30,
+    "info_row": 32,
+    "items_start": 37,
+    "notes_row": 42,
+    "total_row": 45,
+    "payment_row": 46,
+    "handler_row": 48,
+}
 
 
 def _is_blank(val: Any) -> bool:
@@ -34,11 +44,18 @@ def _is_blank(val: Any) -> bool:
     return False
 
 
+_INVOICE_NO_PREFIXES = (
+    "銷售單 Sales Invoice:", "購入單 Purchase Invoice:",
+    "兌料單 Exchange Invoice:", "交收單 Delivery Note:",
+    "Invoice No.", "Invoice No", "編號 No.", "編號 No",
+)
+
+
 def _strip_invoice_no(val: Any) -> str:
     if _is_blank(val):
         return ""
     text = str(val).strip()
-    for prefix in ("Invoice No.", "Invoice No", "編號 No.", "編號 No"):
+    for prefix in _INVOICE_NO_PREFIXES:
         if text.startswith(prefix):
             return text[len(prefix) :].strip()
     return text
@@ -90,7 +107,7 @@ def _fmt_weight_line(weight: Any, unit: Any) -> str:
 
 
 def _fmt_money(currency: Any, amount: Any) -> str:
-    """Format as 'HKD$ 0.00' — numeric 0 is valid."""
+    """Format as 'HKD 0.00' — numeric 0 is valid."""
     curr = "" if _is_blank(currency) else str(currency).strip()
     if _is_blank(amount):
         return curr
@@ -124,9 +141,9 @@ class ReceiptLine:
     unit_price: str = ""
     currency: str = ""
     amount: Any = None  # raw numeric for zeros
-    amount_display: str = ""  # "HKD$ 0.00"
+    amount_display: str = ""  # "HKD 0.00"
     stock_action: str = ""  # e.g. 取 A倉庫
-    stock_location: str = ""  # e.g. 存 客戶
+    stock_location: str = ""  # e.g. 存 A倉庫 / 取 A倉庫
 
 
 @dataclass
@@ -141,6 +158,7 @@ class ReceiptCopy:
     note_amount_display: str = ""
     total_display: str = ""
     handler: str = ""
+    invoice_label: str = ""
     payment_lines: list[str] = field(default_factory=list)
 
     @property
@@ -244,21 +262,19 @@ def _read_item_lines(ws, items_start: int, notes_row: int, is_company: bool) -> 
     return lines
 
 
-def _read_copy(ws, base: dict, kind: str) -> ReceiptCopy:
-    offset = 0 if kind == "customer" else COMPANY_COPY_OFFSET
-    inv_row = base["invoice_no_row"] + offset
-    info_row = base["info_row"] + offset
-    items_start = base["items_start"] + offset
-    notes_row = base["notes_row"] + offset
-    total_row = base["total_row"] + offset
-    payment_row = base["payment_row"] + offset
+def _read_copy(ws, layout: dict, kind: str) -> ReceiptCopy:
+    inv_row = layout["invoice_no_row"]
+    info_row = layout["info_row"]
+    items_start = layout["items_start"]
+    notes_row = layout["notes_row"]
+    total_row = layout["total_row"]
+    payment_row = layout["payment_row"]
+    handler_row = layout.get("handler_row", payment_row + 2)
     is_company = kind == "company"
 
     invoice_no = _strip_invoice_no(ws.cell(inv_row, 11).value)
     customer = "" if _is_blank(ws.cell(info_row, 5).value) else str(ws.cell(info_row, 5).value).strip()
-    phone = ""
-    if is_company:
-        phone = "" if _is_blank(ws.cell(info_row, 7).value) else str(ws.cell(info_row, 7).value).strip()
+    phone = "" if _is_blank(ws.cell(info_row, 7).value) else str(ws.cell(info_row, 7).value).strip()
     date_s = _fmt_date(ws.cell(info_row, 11).value)
 
     lines = _read_item_lines(ws, items_start, notes_row, is_company)
@@ -274,12 +290,21 @@ def _read_copy(ws, base: dict, kind: str) -> ReceiptCopy:
     note_amt = _fmt_money(ws.cell(notes_row, 10).value, ws.cell(notes_row, 11).value)
     total = _fmt_money(ws.cell(total_row, 10).value, ws.cell(total_row, 11).value)
 
-    handler_raw = ws.cell(payment_row, 6).value
-    handler = "" if _is_blank(handler_raw) else str(handler_raw).strip()
-    if kind == "customer":
-        # Canonical: customer copy always shows XXXX
-        handler = CUSTOMER_HANDLER
-    elif not handler:
+    # Handler block: 「經手人 Handler:」 label above the staff name.
+    handler_label = ws.cell(handler_row - 1, 6).value
+    handler_name = ws.cell(handler_row, 6).value
+    handler = "" if _is_blank(handler_name) else str(handler_name).strip()
+    if not handler:
+        # Fallback: legacy single-cell handler at the label row.
+        legacy = "" if _is_blank(handler_label) else str(handler_label).strip()
+        if (
+            legacy
+            and "經手人" not in legacy
+            and "Handled by" not in legacy
+            and "Handler:" not in legacy
+        ):
+            handler = legacy
+    if not handler:
         handler = "Admin"
 
     payments: list[str] = []
@@ -312,7 +337,7 @@ def from_excel(excel_path) -> ReceiptDocument:
     wb = openpyxl.load_workbook(path, data_only=False)
     ws = wb.active
     customer = _read_copy(ws, CUSTOMER_COPY, "customer")
-    company = _read_copy(ws, CUSTOMER_COPY, "company")
+    company = _read_copy(ws, COMPANY_COPY, "company")
     invoice_no = customer.invoice_no or company.invoice_no
     # Prefer company phone/customer if customer blank
     if not customer.customer:
@@ -330,37 +355,48 @@ def from_invoice_data(
     date_s = _fmt_date(invoice_data.get("transaction_date"))
     customer_name = (invoice_data.get("customer_name") or "").strip()
     phone = (invoice_data.get("customer_phone") or "").strip()
-    currency = invoice_data.get("invoice_currency") or "HKD$"
-    handler_co = (invoice_data.get("handler") or "").strip() or "Admin"
+    currency = invoice_data.get("invoice_currency") or "HKD"
+    handler_name = (invoice_data.get("handler") or "").strip() or "Admin"
+
+    def _item_line(item, with_stock: bool, source_key="source_location", dest_key="destination_location"):
+        weights = []
+        if item.get("weight_gram") is not None:
+            weights.append(_fmt_weight_line(item.get("weight_gram"), "克 Gram"))
+        if item.get("weight_tael"):
+            weights.append(_fmt_weight_line(item.get("weight_tael"), "両 Tael"))
+        if item.get("weight_oz"):
+            weights.append(_fmt_weight_line(item.get("weight_oz"), "安士 oz"))
+        amt = item.get("amount")
+        line = ReceiptLine(
+            item_type=(item.get("item_type") or "").strip(),
+            quality=(item.get("quality") or "").strip(),
+            weight_lines=weights,
+            unit_price=_fmt_price(item.get("unit_price")),
+            currency=currency,
+            amount=amt,
+            amount_display=_fmt_money(currency, amt if amt is not None else 0),
+        )
+        if with_stock:
+            src = (invoice_data.get(source_key) or invoice_data.get("source_location") or "").strip()
+            dst = (invoice_data.get(dest_key) or invoice_data.get("destination_location") or "").strip()
+            if src:
+                line.stock_action = _strip_stock_label(src)
+            if dst:
+                line.stock_location = _strip_stock_label(dst)
+        return line
 
     def build_lines(with_stock: bool) -> list[ReceiptLine]:
         out: list[ReceiptLine] = []
         for item in main_items or []:
-            weights = []
-            if item.get("weight_gram") is not None:
-                weights.append(_fmt_weight_line(item.get("weight_gram"), "克 Gram"))
-            if item.get("weight_tael") is not None:
-                weights.append(_fmt_weight_line(item.get("weight_tael"), "両 Tael"))
-            if item.get("weight_oz") is not None:
-                weights.append(_fmt_weight_line(item.get("weight_oz"), "安士 oz"))
-            amt = item.get("amount")
-            line = ReceiptLine(
-                item_type=(item.get("item_type") or "").strip(),
-                quality=(item.get("quality") or "").strip(),
-                weight_lines=weights,
-                unit_price=_fmt_price(item.get("unit_price")),
-                currency=currency,
-                amount=amt,
-                amount_display=_fmt_money(currency, amt if amt is not None else 0),
-            )
-            if with_stock:
-                src = (invoice_data.get("source_location") or "").strip()
-                dst = (invoice_data.get("destination_location") or "").strip()
-                if src:
-                    line.stock_action = _strip_stock_label(src)
-                if dst:
-                    line.stock_location = _strip_stock_label(dst)
-            out.append(line)
+            out.append(_item_line(item, with_stock))
+        if exchange_items:
+            out.append(ReceiptLine(item_type="對換"))
+            for item in exchange_items:
+                out.append(_item_line(
+                    item, with_stock,
+                    source_key="exchange_source_location",
+                    dest_key="exchange_destination_location",
+                ))
         return out
 
     total = invoice_data.get("cash_warehouse_amount")
@@ -370,16 +406,27 @@ def from_invoice_data(
         total = 0
     total_disp = _fmt_money(currency, total)
 
+    try:
+        from invoice_generator import format_payment_excel_lines
+        pay_lines = format_payment_excel_lines(invoice_data.get("payment_method") or "")
+    except Exception:
+        pay_lines = []
+
     customer = ReceiptCopy(
         kind="customer",
         invoice_no=inv,
         date=date_s,
         customer=customer_name,
-        phone="",
+        phone=phone,
         lines=build_lines(False),
         notes=(invoice_data.get("notes") or "").strip(),
         total_display=total_disp,
-        handler=CUSTOMER_HANDLER,
+        handler=handler_name,
+        invoice_label=(
+            TRANSACTION_TYPES.get(invoice_data.get("transaction_type") or "", {})
+            or {}
+        ).get("invoice_label") or "",
+        payment_lines=pay_lines,
     )
     company = ReceiptCopy(
         kind="company",
@@ -390,6 +437,8 @@ def from_invoice_data(
         lines=build_lines(True),
         notes=(invoice_data.get("notes") or "").strip(),
         total_display=total_disp,
-        handler=handler_co,
+        handler=handler_name,
+        invoice_label=customer.invoice_label,
+        payment_lines=pay_lines,
     )
     return ReceiptDocument(invoice_no=inv, customer=customer, company=company)

@@ -19,13 +19,21 @@ def normalize_item_category(item_type: str):
     return None
 
 
-def build_inventory_movements(transaction_type, main_items, exchange_items=None):
-    """Build inventory movement records from invoice line items."""
+def build_inventory_movements(
+    transaction_type, main_items, exchange_items=None,
+    main_source_location="", main_destination_location="",
+    exchange_source_location="", exchange_destination_location="",
+):
+    """Build inventory movement records from invoice line items.
+
+    For 兌料單 (exchange): A（來料）入倉以 main_* 為準；B（對換）出倉以
+    exchange_* 為準，因此兩者可落在不同倉庫。
+    """
     tx_config = TRANSACTION_TYPES[transaction_type]
     direction = tx_config["inventory_direction"]
     movements = []
 
-    def add_items(items, dir_override=None):
+    def add_items(items, dir_override=None, source="", destination=""):
         for item in items:
             gram = item.get("weight_gram")
             if gram is None:
@@ -43,16 +51,30 @@ def build_inventory_movements(transaction_type, main_items, exchange_items=None)
                 "weight_gram": gram,
                 "weight_tael": tael,
                 "weight_oz": oz,
+                "source_location": source,
+                "destination_location": destination,
             })
 
     if direction == "exchange":
-        add_items(main_items, "in")
+        add_items(
+            main_items, "in",
+            source=main_source_location, destination=main_destination_location,
+        )
         if exchange_items:
-            add_items(exchange_items, "out")
+            add_items(
+                exchange_items, "out",
+                source=exchange_source_location, destination=exchange_destination_location,
+            )
     elif direction == "in":
-        add_items(main_items, "in")
+        add_items(
+            main_items, "in",
+            source=main_source_location, destination=main_destination_location,
+        )
     elif direction == "out":
-        add_items(main_items, "out")
+        add_items(
+            main_items, "out",
+            source=main_source_location, destination=main_destination_location,
+        )
 
     return movements
 

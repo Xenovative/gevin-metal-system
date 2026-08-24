@@ -24,14 +24,14 @@ ITEM_TYPES = [
     "其他 Other",
 ]
 
-QUALITY_OPTIONS = ["足金", "24K", "24k", "18K", "9.997", "其他", "按資料"]
+QUALITY_OPTIONS = []
 
 UNITS = ["克 Gram", "両 Tael"]
 
 PAYMENT_METHODS = ["現金 Cash", "轉帳 Transfer", "支票 Cheque", "其他 Other"]
 CASH_PAYMENT_METHOD = "現金 Cash"
-CASH_CURRENCIES = ["HKD$", "USD$", "CNY¥", "EUR€", "GBP£", "JPY¥", "TWD$", "MOP$", "SGD$"]
-DEFAULT_CASH_CURRENCY = "HKD$"
+CASH_CURRENCIES = ["HKD", "USD", "CNY", "EUR", "GBP", "JPY", "TWD", "MOP", "SGD"]
+DEFAULT_CASH_CURRENCY = "HKD"
 
 ROLE_ADMIN = "admin"
 ROLE_STAFF = "staff"
@@ -81,8 +81,9 @@ def compose_receipt_storage(action, warehouse, transaction_type=None):
     """
     Receipt Inventory Deposit/Withdrawal → source + destination labels.
 
-    Deposit Gold/Silver A: Warehouse Location  → 存 {warehouse}
-    Withdraw Gold/Silver A                     → 取 {warehouse}
+    Deposit Gold/Silver A: Warehouse Location  → 存 {warehouse} only
+    Withdraw Gold/Silver A                     → 取 {warehouse} only
+    There is no 存 客戶 / 取 客戶; metal from the client goes straight into a warehouse.
     """
     del transaction_type  # reserved for future auto-defaults
     action = (action or "").strip()
@@ -91,17 +92,9 @@ def compose_receipt_storage(action, warehouse, transaction_type=None):
         return "", ""
 
     if action == INVENTORY_ACTION_DEPOSIT:
-        # Deposit into warehouse location
-        return (
-            f"{INVENTORY_ACTION_WITHDRAW} {EXTERNAL_PARTY_LOCATION}",
-            f"{INVENTORY_ACTION_DEPOSIT} {warehouse}",
-        )
+        return "", f"{INVENTORY_ACTION_DEPOSIT} {warehouse}"
 
-    # Withdraw from warehouse location
-    return (
-        f"{INVENTORY_ACTION_WITHDRAW} {warehouse}",
-        f"{INVENTORY_ACTION_DEPOSIT} {EXTERNAL_PARTY_LOCATION}",
-    )
+    return f"{INVENTORY_ACTION_WITHDRAW} {warehouse}", ""
 
 # 舊版保險箱名稱對照（讀取歷史資料用）
 WAREHOUSE_ALIASES = {
@@ -113,10 +106,10 @@ WAREHOUSE_ALIASES = {
 
 # 現金收入／支出交易類型
 CASH_IN_TRANSACTION_TYPES = {
-    "銷售", "兌料",
+    "銷售單", "兌料單",
 }
 CASH_OUT_TRANSACTION_TYPES = {
-    "購入", "交收去料",
+    "購入單", "交收單",
 }
 
 SAFE_LOCATIONS = STORAGE_LOCATION_CHOICES
@@ -126,47 +119,60 @@ SAFE_SUMMARY_CATEGORIES = ["金", "純銀"]
 # 交易性質設定
 # customer_notes_col: 客戶單備註欄（D=4, E=5）；公司單統一用 E 欄
 # inventory_direction: in=入倉 / out=出倉 / exchange=兌換（來料入、對換出）
+# invoice_label: 單號前之中英文標籤（寫入 Excel J3/J30）
 TRANSACTION_TYPES = {
-    "銷售": {
+    "銷售單": {
         "sheet": "銷售",
         "prefix": "S",
         "number_label": "Invoice No.",
+        "invoice_label": "銷售單 Sales Invoice:",
         "inventory_direction": "out",
         "has_exchange": False,
         "has_amount": True,
         "customer_notes_col": 4,
         "description": "銷售金屬給客戶，金屬出倉",
     },
-    "購入": {
+    "購入單": {
         "sheet": "購入單",
         "prefix": "P",
         "number_label": "Invoice No.",
+        "invoice_label": "購入單 Purchase Invoice:",
         "inventory_direction": "in",
         "has_exchange": False,
         "has_amount": True,
         "customer_notes_col": 5,
         "description": "向供應商購入金屬，金屬入倉",
     },
-    "兌料": {
+    "兌料單": {
         "sheet": "兌料單",
         "prefix": "T",
         "number_label": "Invoice No.",
+        "invoice_label": "兌料單 Exchange Invoice:",
         "inventory_direction": "exchange",
         "has_exchange": True,
         "has_amount": True,
         "customer_notes_col": 5,
         "description": "客戶來料兌換新貨，需填寫「對換貨品」",
     },
-    "交收去料": {
+    "交收單": {
         "sheet": "交收單",
         "prefix": "D",
         "number_label": "編號 No.",
+        "invoice_label": "交收單 Delivery Note:",
         "inventory_direction": "out",
         "has_exchange": False,
         "has_amount": False,
         "customer_notes_col": 5,
         "description": "金屬送去提純等，出倉記錄",
     },
+}
+
+# 舊交易類型名稱 → 新名稱（資料庫遷移用）
+TRANSACTION_TYPE_RENAMES = {
+    "銷售": "銷售單",
+    "購入": "購入單",
+    "兌料": "兌料單",
+    "交收去料": "交收單",
 }
 
 GRAMS_PER_TAEL = 37.5

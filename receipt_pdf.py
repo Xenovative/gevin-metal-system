@@ -17,7 +17,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas as pdf_canvas
 
 from config import BASE_DIR, OUTPUT_DIR
-from receipt_model import ReceiptCopy, ReceiptDocument, from_excel
+from receipt_model import ReceiptCopy, ReceiptDocument, from_excel, from_invoice_data
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +39,18 @@ LIGHT_RULE = Color(0.75, 0.70, 0.60)
 def _register_font() -> str:
     if FONT_NAME in pdfmetrics.getRegisteredFontNames():
         return FONT_NAME
+    # TrueType CJK first. Noto CJK TTC on Debian is often CFF/PostScript
+    # outlines, which ReportLab cannot embed.
     candidates = [
+        Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+        Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
+        Path("/usr/share/fonts/truetype/arphic/uming.ttc"),
+        Path("/usr/share/fonts/truetype/arphic/ukai.ttc"),
         Path(r"C:\Windows\Fonts\kaiu.ttf"),
         Path(r"C:\Windows\Fonts\msyh.ttc"),
         Path(r"C:\Windows\Fonts\msjh.ttc"),
         Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-        Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
     ]
     for path in candidates:
         if not path.exists():
@@ -138,33 +143,38 @@ def _draw_copy(c, font: str, copy: ReceiptCopy, y_top: float, y_floor: float) ->
     mid = PAGE_W / 2.0
     usable_bottom = y_floor + 10.0
 
-    # Invoice no (right) + Date label/value
+    # Invoice type + number (right) + Date
+    if getattr(copy, "invoice_label", ""):
+        _draw_text(c, copy.invoice_label, right - 155, y, font=font, size=8.0, align="right", max_w=155)
     _draw_text(c, copy.invoice_no, right, y, font=font, size=10.0, align="right", max_w=160)
     y -= 16
     _draw_text(c, "日期 Date:", right - 110, y, font=font, size=8.0, align="left")
     _draw_text(c, copy.date, right, y, font=font, size=9.0, align="right", max_w=100)
     y -= 18
 
-    # Customer / Tel
+    # Customer / Tel — both copies
     _draw_text(c, "客戶 Customer:", left, y, font=font, size=8.0)
     _draw_text(c, copy.customer, left + 78, y, font=font, size=10.0, max_w=200)
-    if copy.kind == "company" and copy.phone:
+    if copy.phone:
         _draw_text(c, "電話 Tel:", mid - 20, y, font=font, size=8.0)
         _draw_text(c, copy.phone, mid + 40, y, font=font, size=10.0, max_w=120)
     y -= 6
     _draw_hline(c, y - 2, color=RULE, stroke=0.9)
     y -= 14
 
-    # Column headers
+    # Column headers (match old Excel bilingual titles)
     col_item = left
     col_qual = left + 155
     col_wt = left + 210
+    col_stock = left + 300
     col_price = right - 150
     col_amt = right
     _draw_text(c, "貨品 Item", col_item, y, font=font, size=7.0, color=RULE)
-    _draw_text(c, "成色", col_qual, y, font=font, size=7.0, color=RULE)
+    _draw_text(c, "成色 Quality", col_qual, y, font=font, size=7.0, color=RULE)
     _draw_text(c, "重量 Weight", col_wt, y, font=font, size=7.0, color=RULE)
-    _draw_text(c, "單價", col_price, y, font=font, size=7.0, align="right", color=RULE)
+    if copy.kind == "company":
+        _draw_text(c, "庫存 Stock", col_stock, y, font=font, size=7.0, color=RULE)
+    _draw_text(c, "單價 Unit ($)", col_price, y, font=font, size=7.0, align="right", color=RULE)
     _draw_text(c, "現金倉 Cash Warehouse", col_amt, y, font=font, size=7.0, align="right", color=RULE)
     y -= 4
     _draw_hline(c, y - 2)
@@ -222,10 +232,18 @@ def _draw_copy(c, font: str, copy: ReceiptCopy, y_top: float, y_floor: float) ->
     _draw_hline(c, y + 10, color=RULE, stroke=1.0)
     _draw_text(c, "合計 Total:", right - 130, y, font=font, size=9.0)
     _draw_text(
-        c, copy.total_display or "HKD$ 0.00",
+        c, copy.total_display or "HKD 0.00",
         right, y, font=font, size=11.0, align="right", max_w=120,
     )
     y -= 18
+
+    # Payment methods
+    _draw_text(c, "付款方式 Payment Method :", left, y, font=font, size=8.0)
+    y -= 12
+    for pl in copy.payment_lines or []:
+        _draw_text(c, pl, left + 8, y, font=font, size=8.5, max_w=right - left - 8)
+        y -= 11
+    y -= 4
 
     # Handler
     _draw_text(c, "經手人 Handled by:", left, y, font=font, size=8.0)
@@ -276,7 +294,26 @@ def render_receipt_pdf(doc: ReceiptDocument, out_path: Path) -> str:
     return str(out_path.resolve())
 
 
+def build_invoice_pdf_from_data(invoice_data, main_items, exchange_items=None, out_path=None) -> str:
+    """Perfect V2 PDF from the live invoice payload (not overlay Excel cells)."""
+    if not HEADER_PATH.exists():
+        raise FileNotFoundError(f"Receipt header missing: {HEADER_PATH}")
+    doc = from_invoice_data(invoice_data, main_items, exchange_items)
+    logger.info(
+        "Building Perfect V2 PDF invoice_no=%s customer=%s lines=%s",
+        doc.invoice_no,
+        doc.customer.customer,
+        len(doc.customer.lines),
+    )
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if out_path is None:
+        stem = invoice_data.get("invoice_no") or "invoice"
+        out_path = OUTPUT_DIR / f"{stem}.pdf"
+    return render_receipt_pdf(doc, Path(out_path))
+
+
 def build_invoice_pdf_from_excel(excel_path) -> str:
+    """Legacy: read old template-filled workbooks. New overlays use from_invoice_data."""
     excel_path = Path(excel_path)
     if not excel_path.exists():
         raise FileNotFoundError(f"Excel not found: {excel_path}")

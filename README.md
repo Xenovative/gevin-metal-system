@@ -155,7 +155,7 @@ gevin-metal-system/
 
 ### 數位 PDF（Perfect V2）vs 現場列印
 
-- **數位 PDF**：以 Excel 儲存格為準（`receipt_model`），用 `assets/receipt_header.png` 作雙聯 A4 收據（客戶單／裁切線／公司單）。金額顯示 `HKD$ 0.00`；客戶單經手人 `XXXX`、公司單為實際經手人；庫存欄不併入貨品名稱。
+- **數位 PDF**：以 Excel 儲存格為準（`receipt_model`），用 `assets/receipt_header.png` 作雙聯 A4 收據（客戶單／裁切線／公司單）。金額顯示 `HKD$ 0.00`；客戶單與公司單經手人均為實際經手人；庫存欄不併入貨品名稱。
 - **現場列印**：仍用 Excel 印在預印品牌 A4 紙上（勿依賴數位 PDF 當紙本）。
 
 若 Perfect V2 產生失敗，會退回 LibreOffice／Excel COM 把工作簿轉成 PDF（可選）。

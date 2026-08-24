@@ -1,6 +1,6 @@
 """
-Regression: Excel is source of truth; Perfect V2 PDF contains Excel values
-(zeros retained; stock not glued into item name; dual handlers XXXX/Admin).
+Regression: overlay Excel has data only at LAYOUT coords; Perfect V2 PDF
+is built from invoice_data (not overlay cells).
 """
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from openpyxl import load_workbook
 from pypdf import PdfReader
 
 from cash import signed_cash_warehouse_amount
-from invoice_generator import CUSTOMER_COPY, COMPANY_COPY_OFFSET, generate_invoice_excel
-from receipt_pdf import HEADER_PATH
+from invoice_excel_generator import CUSTOMER_COPY, COMPANY_COPY, generate_invoice_excel
+from receipt_pdf import HEADER_PATH, build_invoice_pdf_from_data
 
 
 def _fixture():
@@ -23,19 +23,19 @@ def _fixture():
     total = 0.0
     data = {
         "invoice_no": invoice_no,
-        "transaction_type": "銷售",
+        "transaction_type": "銷售單",
         "customer_name": "pmp",
         "customer_phone": "90001111",
         "transaction_date": date(2026, 7, 31),
         "handler": "Admin",
         "payment_method": "",
-        "invoice_currency": "HKD$",
+        "invoice_currency": "HKD",
         "source_location": "取 A倉庫",
-        "destination_location": "存 客戶",
+        "destination_location": "",
         "notes": "",
         "note_amount": 0,
         "total_amount": total,
-        "cash_warehouse_amount": signed_cash_warehouse_amount(total, "銷售"),
+        "cash_warehouse_amount": signed_cash_warehouse_amount(total, "銷售單"),
     }
     items = [
         {
@@ -54,35 +54,49 @@ def _fixture():
 def _assert_excel(path: Path):
     ws = load_workbook(path)["銷售"]
     assert ws.cell(CUSTOMER_COPY["items_start"], 3).value == "足金 Pure Gold"
-    assert ws.cell(CUSTOMER_COPY["items_start"], 11).value == 0
-    assert ws.cell(CUSTOMER_COPY["total_row"], 10).value == "HKD$"
+    assert float(ws.cell(CUSTOMER_COPY["items_start"], 11).value) == 0
+    assert ws.cell(CUSTOMER_COPY["total_row"], 10).value == "HKD"
     assert float(ws.cell(CUSTOMER_COPY["total_row"], 11).value) == 0.0
     assert ws.cell(CUSTOMER_COPY["info_row"], 5).value == "pmp"
     inv = str(ws.cell(CUSTOMER_COPY["invoice_no_row"], 11).value)
     assert "TEST_PDF_PARITY_001" in inv
+    # Bilingual invoice-type label in col J, serial in col K
+    label = str(ws.cell(CUSTOMER_COPY["invoice_no_row"], 10).value or "")
+    assert "銷售單" in label and "Sales Invoice" in label
+    co_inv_row = COMPANY_COPY["invoice_no_row"]
+    co_label = str(ws.cell(co_inv_row, 10).value or "")
+    assert "銷售單" in co_label and "Sales Invoice" in co_label
 
-    # Dual handlers
-    assert ws.cell(CUSTOMER_COPY["payment_row"], 6).value == "XXXX"
-    co_pay = CUSTOMER_COPY["payment_row"] + COMPANY_COPY_OFFSET
-    assert ws.cell(co_pay, 6).value == "Admin"
+    assert ws.cell(CUSTOMER_COPY["handler_row"] - 1, 6).value == "經手人 Handler:"
+    assert ws.cell(CUSTOMER_COPY["handler_row"], 6).value == "Admin"
+    co_handler = COMPANY_COPY["handler_row"]
+    assert ws.cell(co_handler - 1, 6).value == "經手人 Handler:"
+    assert ws.cell(co_handler, 6).value == "Admin"
+    assert ws.cell(CUSTOMER_COPY["info_row"], 7).value == "90001111"
+    assert ws.cell(CUSTOMER_COPY["items_start"] - 3, 3).value == "貨品"
+    assert ws.cell(CUSTOMER_COPY["items_start"] - 2, 9).value == "Unit ($)"
+    assert ws.cell(CUSTOMER_COPY["items_start"] - 2, 6).value == "Weight"
+    assert not ws.cell(CUSTOMER_COPY["items_start"] - 3, 8).value
+    assert not ws.cell(CUSTOMER_COPY["items_start"] - 2, 8).value
+    co_hdr = COMPANY_COPY["items_start"] - 3
+    assert ws.cell(co_hdr, 8).value == "庫存"
+    assert ws.cell(co_hdr + 1, 8).value == "Stock"
 
-    # Tael spelling
-    tael_unit = str(ws.cell(CUSTOMER_COPY["items_start"] + 1, 7).value or "")
-    assert "Tael" in tael_unit
-    assert "Teal" not in tael_unit
+    # Zero 両/安士 must not consume extra rows
+    assert ws.cell(CUSTOMER_COPY["items_start"] + 1, 7).value in (None, "")
 
-    co_items = CUSTOMER_COPY["items_start"] + COMPANY_COPY_OFFSET
+    co_items = COMPANY_COPY["items_start"]
     assert ws.cell(co_items, 3).value == "足金 Pure Gold"
     stock = str(ws.cell(co_items, 8).value or "")
     assert "取 A倉庫" in stock or "A倉庫" in stock
+    assert "存 客戶" not in stock
+    assert "取 客戶" not in stock
+    assert "客戶" not in stock
     assert "倉存存取" not in stock
     item_cell = str(ws.cell(co_items, 3).value or "")
     assert "(取" not in item_cell
     assert "取 A倉庫" not in item_cell
-
-    stock_dest = str(ws.cell(co_items + 1, 8).value or "")
-    assert "存 客戶" in stock_dest or "客戶" in stock_dest
-    assert "倉存位置" not in stock_dest
+    assert not ws.cell(CUSTOMER_COPY["items_start"], 8).value
     print("Excel assertions OK")
 
 
@@ -98,10 +112,10 @@ def _assert_brand_pdf(path: Path):
     assert "TEST_PDF_PARITY_001" in text or "TEST_PDF_PARI" in text
     assert "pmp" in text
     assert "足金" in text or "Pure Gold" in text
-    assert "HKD$ 0.00" in text or "HKD$" in text
+    assert "HKD 0.00" in text or "HKD" in text
     assert "0" in text
-    assert "XXXX" in text
     assert "Admin" in text
+    assert "XXXX" not in text
     assert "取 A倉庫" in text or "A倉庫" in text
     assert "倉存存取" not in text
     assert "倉存位置" not in text
@@ -122,9 +136,7 @@ def main():
     pdf = excel.with_suffix(".pdf")
     if not pdf.exists():
         try:
-            from receipt_pdf import build_invoice_pdf_from_excel
-
-            build_invoice_pdf_from_excel(excel)
+            build_invoice_pdf_from_data(data, items, None, pdf)
         except Exception as exc:
             print(
                 "SKIP PDF parity: Perfect V2 render unavailable "

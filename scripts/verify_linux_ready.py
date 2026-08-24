@@ -53,6 +53,7 @@ def check_deploy_files():
         ".gitignore",
         "requirements.txt",
         "templates/invoice_template.xlsx",
+        "assets/S260800018v4.xlsx",
         "assets/receipt_header.png",
         "scripts/docker-run.sh",
         "scripts/install-ubuntu.sh",
@@ -127,26 +128,26 @@ def check_core_smoke():
     from openpyxl import load_workbook
     import app as m
 
-    assert signed_cash_warehouse_amount(1000, "購入") == -1000
-    assert signed_cash_warehouse_amount(1000, "銷售") == 1000
+    assert signed_cash_warehouse_amount(1000, "購入單") == -1000
+    assert signed_cash_warehouse_amount(1000, "銷售單") == 1000
     src, dst = compose_receipt_storage("存", "A倉庫")
-    assert "A倉庫" in dst
+    assert dst == "存 A倉庫" and src == ""
 
     data = {
         "invoice_no": "LINUX_READY_P1",
-        "transaction_type": "購入",
+        "transaction_type": "購入單",
         "customer_name": "DeployCheck",
         "customer_phone": "",
         "transaction_date": date(2026, 8, 12),
         "handler": "Admin",
         "payment_method": "",
-        "invoice_currency": "HKD$",
-        "source_location": "取 客戶",
+        "invoice_currency": "HKD",
+        "source_location": "",
         "destination_location": "存 A倉庫",
         "notes": "",
         "note_amount": 0,
         "total_amount": 100.0,
-        "cash_warehouse_amount": signed_cash_warehouse_amount(100, "購入"),
+        "cash_warehouse_amount": signed_cash_warehouse_amount(100, "購入單"),
     }
     items = [
         {
@@ -162,18 +163,20 @@ def check_core_smoke():
     path = Path(generate_invoice_excel(data, items))
     assert path.exists()
     ws = load_workbook(path)["購入單"]
-    assert ws.cell(11, 11).value == -100
-    stock = str(ws.cell(38, 8).value or "")
+    assert ws.cell(10, 11).value == -100
+    stock = str(ws.cell(37, 8).value or "")
     assert "倉存存取" not in stock
-    assert "取 客戶" in stock or "客戶" in stock
+    assert "存 A倉庫" in stock
+    assert "取 客戶" not in stock
+    assert "存 客戶" not in stock
 
     cm = build_cash_movement(data)
     assert cm["direction"] == "out"
 
     payload = m.load_review_page()
-    assert len(payload) == 10
+    assert len(payload) == 8
     m.build_app()
-    print("OK: Excel/PDF path + Gradio app build")
+    print("OK: Excel path + Gradio app build")
 
 
 def main():
