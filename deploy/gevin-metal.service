@@ -9,6 +9,8 @@ Group=__APP_USER__
 WorkingDirectory=__APP_DIR__
 Environment=PORT=__APP_PORT__
 Environment=GRADIO_ANALYTICS_ENABLED=False
+Environment=GRADIO_SERVER_NAME=0.0.0.0
+Environment=GRADIO_NODE_SERVER_NAME=0.0.0.0
 ExecStart=__APP_DIR__/.venv/bin/python __APP_DIR__/app.py
 Restart=on-failure
 RestartSec=5

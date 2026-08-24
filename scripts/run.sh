@@ -21,6 +21,9 @@ if [[ ! -x .venv/bin/python ]]; then
   .venv/bin/pip install -r requirements.txt
 fi
 
+# shellcheck source=lan-urls.sh
+source "$ROOT_DIR/scripts/lan-urls.sh"
+
 PORT="${PORT:-7861}"
 export PORT
 export GRADIO_ANALYTICS_ENABLED="${GRADIO_ANALYTICS_ENABLED:-False}"
@@ -28,7 +31,6 @@ export GRADIO_SERVER_NAME="${GRADIO_SERVER_NAME:-0.0.0.0}"
 export GRADIO_NODE_SERVER_NAME="${GRADIO_NODE_SERVER_NAME:-0.0.0.0}"
 export PYTHONUNBUFFERED=1
 
-echo "Starting gevin-metal-system on http://0.0.0.0:${PORT}"
-echo "Open from this machine: http://127.0.0.1:${PORT}"
-echo "Open from iPad/phone/PC on LAN: http://<server-ip>:${PORT}"
+echo "Starting gevin-metal-system (shared DB for all LAN devices)"
+print_access_urls
 exec .venv/bin/python app.py

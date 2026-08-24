@@ -4,6 +4,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+# shellcheck source=lan-urls.sh
+source "$ROOT_DIR/scripts/lan-urls.sh"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "ERROR: docker is not installed. On Ubuntu: sudo apt-get install -y docker.io docker-compose-v2" >&2
@@ -26,11 +28,12 @@ fi
 echo "==> Building and starting gevin-metal (port ${PORT:-7861})..."
 docker compose up -d --build
 
+PORT="${PORT:-7861}"
+export PORT
 echo ""
-echo "Running."
-echo "  This machine:  http://127.0.0.1:${PORT:-7861}"
-echo "  LAN devices:   http://<server-ip>:${PORT:-7861}"
-echo "  Login:         admin / admin123"
+echo "Running. One Linux server, one database — open the URL on iPad / PC / phone:"
+print_access_urls
 echo ""
 echo "Logs:   docker compose logs -f"
 echo "Stop:   docker compose down"
+echo "Update: bash scripts/update.sh"

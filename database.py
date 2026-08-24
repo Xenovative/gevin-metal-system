@@ -11,6 +11,7 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    event,
 )
 from sqlalchemy.orm import declarative_base, scoped_session, sessionmaker
 
@@ -306,6 +307,15 @@ def _migrate_currency_codes(conn, inspector):
         )
 
 
+def _enable_sqlite_wal(dbapi_conn, connection_record):
+    """WAL + busy timeout so several LAN browsers can share one SQLite file."""
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.close()
+
+
 def init_db():
     ensure_runtime_dirs()
     # as_posix() keeps sqlite URLs portable on Linux (/path) and Windows (C:/path)
@@ -313,9 +323,10 @@ def init_db():
     # check_same_thread=False: Gradio handles requests on multiple threads / devices
     engine = create_engine(
         db_url,
-        connect_args={"check_same_thread": False},
+        connect_args={"check_same_thread": False, "timeout": 30},
         pool_pre_ping=True,
     )
+    event.listen(engine, "connect", _enable_sqlite_wal)
     Base.metadata.create_all(engine)
     _migrate_db(engine)
     Session = scoped_session(sessionmaker(bind=engine, autoflush=False, autocommit=False))

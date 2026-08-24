@@ -25,6 +25,8 @@
 
 適用於要給區網多台裝置（iPad / 手機 / PC）使用的 Linux 主機。環境固定，較少 Python/venv 問題。
 
+**一台伺服器、一份資料庫：** 只在 Linux 主機安裝並啟動。iPad 與其他電腦**不要 clone、不要再裝一份**，用瀏覽器開同一網址。所有發票、倉存、員工帳號都存在主機的 `data/gevin.db`。Admin 在「🔐 Admin 管理」建立員工帳號後，員工用各自帳號在任何裝置登入即可。
+
 **重要（客戶機乾淨安裝）：** GitHub 倉庫**不含**本機測試用的 SQLite／發票 mock 資料（`data/`、`output/` 已列入 `.gitignore` 與 `.dockerignore`）。在客戶 Linux 上 `git clone` 後第一次啟動會建立**空白**資料庫，只有預設 `admin` / `admin123`，不會帶入筆電上的假單據。
 
 ### 一鍵（需已安裝 Docker）
@@ -36,6 +38,15 @@ git clone https://github.com/Xenovative/gevin-metal-system.git
 cd gevin-metal-system
 bash scripts/docker-run.sh
 ```
+
+之後更新程式（**不會刪除資料庫或員工帳號**）：
+
+```bash
+cd gevin-metal-system
+bash scripts/update.sh
+```
+
+啟動時終端機會印出區網網址，例如 `http://192.168.1.20:7861`。在 iPad Safari / 其他 PC 瀏覽器開這個網址。防火牆若有開：`sudo ufw allow 7861/tcp`。
 
 部署前可在伺服器上跑：
 
@@ -54,7 +65,7 @@ docker compose up -d --build
 瀏覽器：
 
 - 本機：`http://127.0.0.1:7861`
-- 區網：`http://<伺服器IP>:7861`
+- 區網 iPad / PC：`http://<伺服器IP>:7861`
 
 常用指令：
 
@@ -62,17 +73,17 @@ docker compose up -d --build
 docker compose logs -f      # 看日誌
 docker compose restart      # 重啟
 docker compose down         # 停止
-docker compose up -d --build   # 更新程式後重建
+bash scripts/update.sh      # 從 GitHub 拉最新碼並重建（保留 data/）
 ```
 
 `data/`、`output/`、`logs/`、`templates/` 會掛載到主機，資料庫與發票不會因重建容器而遺失。
 
-防火牆若有開：`sudo ufw allow 7861/tcp`
+### 預設登入與員工帳號
 
-### 預設登入
-
-- 帳號：`admin`
-- 密碼：`admin123`
+- 首次：帳號 `admin`、密碼 `admin123`（請立刻改密碼）
+- Admin 登入後開啟 **🔐 Admin 管理** → 填帳號／姓名／密碼 → **建立員工帳號**
+- 員工在 iPad 或其他 PC 開同一個區網網址，用自己的帳號登入
+- 不要在每台裝置各裝一份系統，否則會變成多個資料庫、帳號與庫存對不上
 
 ## Linux 一鍵部署（不用 Docker / venv）
 
@@ -86,9 +97,9 @@ sudo apt-get update && sudo apt-get install -y git && git clone https://github.c
 bash scripts/run.sh
 ```
 
-第一次會自動建立 `.venv` 並安裝依賴。預設埠 **7861**。
+第一次會自動建立 `.venv` 並安裝依賴。預設埠 **7861**。之後更新：`bash scripts/update.sh`。
 
-瀏覽器：`http://127.0.0.1:7861` 或 `http://<伺服器IP>:7861`
+瀏覽器：`http://127.0.0.1:7861` 或 iPad／其他 PC：`http://<伺服器IP>:7861`（啟動時會印出實際 IP）。
 
 自訂埠：`PORT=8080 bash scripts/run.sh`
 
@@ -130,7 +141,8 @@ gevin-metal-system/
 ├── scripts/
 │   ├── docker-run.sh
 │   ├── install-ubuntu.sh
-│   └── run.sh
+│   ├── run.sh
+│   └── update.sh
 ├── deploy/
 ├── templates/
 │   └── invoice_template.xlsx
@@ -143,8 +155,8 @@ gevin-metal-system/
 列印真相：**Excel → 預印 A4 品牌收據紙**（現場）。數位預覽／下載為 Perfect V2 PDF（由 Excel 儲存格產生）。
 
 1. 在「發票覆核」選單號 → 預覽 → **下載 Excel**（系統會依資料庫重新生成，確保與畫面一致）。
-2. 用 Excel / LibreOffice 開啟後選擇 **A4、直向、符合頁面（fit to page / 縮放至一頁）**。
-3. 印表機設定：**實際大小 / 符合可列印區域**（關閉「適合邊距」以外的額外縮放），邊距維持範本預設。
+2. 用 Excel / LibreOffice 開啟後選擇 **A4、直向、縮放 100%**（不要「符合頁面 / Fit to Page」）。
+3. 印表機設定：**實際大小**（關閉額外縮放），邊距維持範本預設。
 4. 紙匣放入 **品牌 A4 收據紙**（上半客戶單、下半公司單；金滿堂／收據框已印好）。
 5. 試印一張：單號、客戶、貨品、金額（J=貨幣、K=現金倉正負數）、備註／合計／付款應對齊框線；Logo／標題帶不可被 Excel 字蓋住。
 6. 貨品過多時畫面會警告，Excel 只印得下的項次，以免蓋住備註／合計區。

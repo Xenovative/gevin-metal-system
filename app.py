@@ -1526,7 +1526,8 @@ def build_app():
         with gr.Column(visible=True) as login_panel:
             gr.Markdown("### 請登入系統")
             gr.Markdown(
-                "首次使用預設 Admin 帳號：`admin` / 密碼：`admin123`（登入後請立即修改密碼）"
+                "首次使用預設 Admin：`admin` / `admin123`（登入後請立即改密碼）。"
+                "員工帳號由 Admin 在「🔐 Admin 管理」建立；iPad 與其他電腦用瀏覽器開同一網址即可，共用這台伺服器的資料庫。"
             )
             with gr.Row():
                 login_username = gr.Textbox(label="帳號", placeholder="輸入帳號")

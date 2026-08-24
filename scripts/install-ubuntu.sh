@@ -39,7 +39,7 @@ if [[ ! -f templates/invoice_template.xlsx ]]; then
   echo "Copy the Excel template into templates/ before generating invoices."
 fi
 
-chmod +x scripts/install-ubuntu.sh scripts/run.sh 2>/dev/null || true
+chmod +x scripts/install-ubuntu.sh scripts/run.sh scripts/update.sh scripts/docker-run.sh 2>/dev/null || true
 
 echo ""
 echo "Install complete."

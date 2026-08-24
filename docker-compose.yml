@@ -13,7 +13,7 @@ services:
       GRADIO_SERVER_NAME: "0.0.0.0"
       GRADIO_NODE_SERVER_NAME: "0.0.0.0"
     volumes:
-      # Persist DB, invoices, reports, logs across rebuilds
+      # One shared SQLite + invoices for every iPad/PC on the LAN
       - ./data:/app/data
       - ./output:/app/output
       - ./logs:/app/logs

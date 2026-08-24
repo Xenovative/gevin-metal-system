@@ -58,6 +58,8 @@ def check_deploy_files():
         "scripts/docker-run.sh",
         "scripts/install-ubuntu.sh",
         "scripts/run.sh",
+        "scripts/update.sh",
+        "scripts/lan-urls.sh",
         "app.py",
         "database.py",
         "config.py",
@@ -175,6 +177,9 @@ def check_core_smoke():
 
     payload = m.load_review_page()
     assert len(payload) == 8
+    from sqlalchemy import text
+    journal = m.session.execute(text("PRAGMA journal_mode")).scalar()
+    assert str(journal).lower() == "wal", journal
     m.build_app()
     print("OK: Excel path + Gradio app build")
 
