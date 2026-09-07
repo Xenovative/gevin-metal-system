@@ -163,7 +163,7 @@ TRANSACTION_TYPES = {
         "has_exchange": False,
         "has_amount": False,
         "customer_notes_col": 5,
-        "description": "金屬送去提純等，出倉記錄",
+        "description": "交收／提純：可存入或取出倉庫",
     },
 }
 

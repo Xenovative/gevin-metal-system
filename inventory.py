@@ -65,16 +65,20 @@ def build_inventory_movements(
                 exchange_items, "out",
                 source=exchange_source_location, destination=exchange_destination_location,
             )
-    elif direction == "in":
-        add_items(
-            main_items, "in",
-            source=main_source_location, destination=main_destination_location,
-        )
-    elif direction == "out":
-        add_items(
-            main_items, "out",
-            source=main_source_location, destination=main_destination_location,
-        )
+        return movements
+
+    # Deposit/Withdraw radio is the source of truth (e.g. 交收單 can 入倉 or 出倉).
+    source = (main_source_location or "").strip()
+    destination = (main_destination_location or "").strip()
+    if destination and not source:
+        direction = "in"
+    elif source and not destination:
+        direction = "out"
+
+    add_items(
+        main_items, direction,
+        source=main_source_location, destination=main_destination_location,
+    )
 
     return movements
 

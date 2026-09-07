@@ -79,6 +79,64 @@ def test_running_and_warehouse_filter():
     print("OK metal running + A filter")
 
 
+def test_delivery_deposit_and_withdraw_direction():
+    from inventory import build_inventory_movements, get_safe_totals
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    import tempfile
+    import database as dbmod
+
+    items = [{
+        "item_type": "足金 Pure Gold",
+        "quality": "999",
+        "weight_gram": 10,
+        "weight_tael": 0,
+        "weight_oz": 0,
+    }]
+    deposit = build_inventory_movements(
+        "交收單", items, main_destination_location="存 A倉庫",
+    )
+    assert len(deposit) == 1
+    assert deposit[0]["direction"] == "in", deposit[0]
+    assert deposit[0]["destination_location"] == "存 A倉庫"
+
+    withdraw = build_inventory_movements(
+        "交收單", items, main_source_location="取 A倉庫",
+    )
+    assert len(withdraw) == 1
+    assert withdraw[0]["direction"] == "out", withdraw[0]
+    assert withdraw[0]["source_location"] == "取 A倉庫"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        engine = create_engine(
+            f"sqlite:///{Path(tmp).as_posix()}/t.db",
+            connect_args={"check_same_thread": False},
+        )
+        dbmod.Base.metadata.create_all(engine)
+        session = sessionmaker(bind=engine)()
+        before = get_safe_totals(session)["A倉庫"]["金"]
+        session.add(
+            dbmod.InventoryMovement(
+                invoice_no="D_TEST_IN",
+                transaction_type="交收單",
+                direction=deposit[0]["direction"],
+                item_type=deposit[0]["item_type"],
+                quality=deposit[0]["quality"],
+                weight_gram=deposit[0]["weight_gram"],
+                weight_tael=0,
+                weight_oz=0,
+                movement_date=date(2026, 9, 7),
+                source_location=deposit[0]["source_location"],
+                destination_location=deposit[0]["destination_location"],
+            )
+        )
+        session.commit()
+        after = get_safe_totals(session)["A倉庫"]["金"]
+        assert after == before + 10, (before, after)
+        session.close()
+    print("OK 交收單 Deposit in / Withdraw out + A倉庫 金 +10")
+
+
 def test_cash_running():
     moves = [
         SimpleNamespace(
@@ -104,6 +162,7 @@ def test_cash_running():
 def main():
     test_period_resolve()
     test_running_and_warehouse_filter()
+    test_delivery_deposit_and_withdraw_direction()
     test_cash_running()
     print("ALL INVENTORY VIEW TESTS PASSED")
 
