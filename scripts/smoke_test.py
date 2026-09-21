@@ -179,6 +179,10 @@ def main():
         v = build_inventory_view(m.session, None, None, wh)
         n = int((v["ledger_metal"]["方向"].isin(["入倉", "出倉"])).sum())
         assert n == db_n, (wh, n, db_n)
+        gold_cats = set(v["ledger_gold"]["品種"]) if not v["ledger_gold"].empty else set()
+        silver_cats = set(v["ledger_silver"]["品種"]) if not v["ledger_silver"].empty else set()
+        assert gold_cats <= {"金"}, gold_cats
+        assert silver_cats <= {"純銀"}, silver_cats
     print("OK warehouse A/B/C synced with DB")
 
     shop = (

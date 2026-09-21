@@ -12,10 +12,12 @@ def normalize_item_category(item_type: str):
     if not item_type:
         return None
     name = str(item_type)
-    if any(keyword in name for keyword in ("足金", "飾金", "雜金", "K金")):
+    if any(keyword in name for keyword in ("足金", "飾金", "雜金", "K金", "黃金")):
         return "金"
     if "純銀" in name or "Silver" in name:
         return "純銀"
+    if "Gold" in name or "金" in name:
+        return "金"
     return None
 
 

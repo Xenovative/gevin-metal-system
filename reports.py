@@ -4,10 +4,16 @@ from pathlib import Path
 import pandas as pd
 from sqlalchemy import and_
 
-from config import CASH_WAREHOUSE, METAL_WAREHOUSES, REPORT_DIR
+from config import CASH_WAREHOUSE, METAL_WAREHOUSES, REPORT_DIR, SAFE_SUMMARY_CATEGORIES
 from database import CashMovement, InventoryMovement, Invoice
 from invoice_generator import format_money, format_payment_method_display
-from cash import extract_cash_amount, extract_cash_currency, get_cash_balances
+from cash import (
+    extract_cash_amount,
+    extract_cash_currency,
+    get_cash_balances,
+    signed_cash_warehouse_amount,
+)
+from inventory import normalize_item_category
 from warehouse import resolve_movement_warehouse
 
 PERIOD_ALL = "全部"
@@ -20,12 +26,13 @@ WAREHOUSE_FILTER_CHOICES = [WAREHOUSE_FILTER_ALL, *METAL_WAREHOUSES, CASH_WAREHO
 UNASSIGNED_WAREHOUSE = "未歸倉庫"
 
 SUMMARY_METAL_COLUMNS = [
-    "倉庫", "期初(克)", "入倉(克)", "出倉(克)", "淨額(克)", "期末(克)", "單據數",
+    "倉庫", "品種", "期初(克)", "入倉(克)", "出倉(克)", "淨額(克)", "期末(克)", "單據數",
 ]
 LEDGER_METAL_COLUMNS = [
-    "日期", "單號", "倉庫", "方向", "重量(+/-克)", "累計(克)",
+    "日期", "單號", "倉庫", "品種", "方向", "重量(+/-克)", "累計(克)",
     "貨品", "成色", "交易性質", "客戶",
 ]
+METAL_OTHER_CATEGORY = "其他"
 SUMMARY_CASH_COLUMNS = [
     "倉庫", "貨幣", "期初", "存入", "支出", "淨額", "期末", "單據數",
 ]
@@ -40,6 +47,18 @@ def empty_summary_metal_df():
 
 def empty_ledger_metal_df():
     return pd.DataFrame(columns=LEDGER_METAL_COLUMNS)
+
+
+def filter_metal_ledger_by_category(ledger_df, category):
+    """Gold or Silver running ledger only (品種 = 金 / 純銀)."""
+    if ledger_df is None or getattr(ledger_df, "empty", True):
+        return empty_ledger_metal_df()
+    if "品種" not in ledger_df.columns:
+        return empty_ledger_metal_df()
+    filtered = ledger_df[ledger_df["品種"] == category]
+    if filtered.empty:
+        return empty_ledger_metal_df()
+    return filtered.reset_index(drop=True)
 
 
 def empty_summary_cash_df():
@@ -94,38 +113,61 @@ def _signed_cash(movement):
     return amount if movement.direction == "in" else -amount
 
 
+def _metal_report_category(item_type):
+    cat = normalize_item_category(item_type)
+    return cat if cat in SAFE_SUMMARY_CATEGORIES else METAL_OTHER_CATEGORY
+
+
 def build_metal_inventory_view(movements, start_date=None, end_date=None, warehouse="全部"):
-    """Ledger + summary for A/B/C. Running total starts from the first DB record."""
+    """Ledger + summary for A/B/C, split by 金 / 純銀. Running total from first DB record."""
     warehouse = (warehouse or WAREHOUSE_FILTER_ALL).strip()
     if warehouse == CASH_WAREHOUSE:
         return empty_summary_metal_df(), empty_ledger_metal_df()
 
-    tracked = list(METAL_WAREHOUSES) + [UNASSIGNED_WAREHOUSE]
+    tracked_wh = list(METAL_WAREHOUSES) + [UNASSIGNED_WAREHOUSE]
     if warehouse in METAL_WAREHOUSES:
-        tracked = [warehouse]
+        tracked_wh = [warehouse]
+    categories = list(SAFE_SUMMARY_CATEGORIES)
 
-    running = {wh: 0.0 for wh in list(METAL_WAREHOUSES) + [UNASSIGNED_WAREHOUSE]}
-    inflow = {wh: 0.0 for wh in running}
-    outflow = {wh: 0.0 for wh in running}
-    invoices = {wh: set() for wh in running}
-    opening = {wh: 0.0 for wh in running}
+    def blank_map():
+        return {(wh, cat): 0.0 for wh in list(METAL_WAREHOUSES) + [UNASSIGNED_WAREHOUSE] for cat in categories}
+
+    running = blank_map()
+    inflow = blank_map()
+    outflow = blank_map()
+    invoices = {(wh, cat): set() for wh, cat in running}
+    opening = blank_map()
     opening_ready = start_date is None
     ledger_rows = []
+    seen_other = set()
+
+    def ensure_key(wh, cat):
+        key = (wh, cat)
+        if key not in running:
+            running[key] = 0.0
+            inflow[key] = 0.0
+            outflow[key] = 0.0
+            invoices[key] = set()
+            opening[key] = 0.0
+        return key
 
     def emit_opening():
-        for wh in tracked:
-            ledger_rows.append({
-                "日期": _fmt_day(start_date) if start_date else "",
-                "單號": "",
-                "倉庫": wh,
-                "方向": "期初",
-                "重量(+/-克)": 0.0,
-                "累計(克)": round(opening[wh], 3),
-                "貨品": "",
-                "成色": "",
-                "交易性質": "",
-                "客戶": "",
-            })
+        for wh in tracked_wh:
+            for cat in categories:
+                key = (wh, cat)
+                ledger_rows.append({
+                    "日期": _fmt_day(start_date) if start_date else "",
+                    "單號": "",
+                    "倉庫": wh,
+                    "品種": cat,
+                    "方向": "期初",
+                    "重量(+/-克)": 0.0,
+                    "累計(克)": round(opening[key], 3),
+                    "貨品": "",
+                    "成色": "",
+                    "交易性質": "",
+                    "客戶": "",
+                })
 
     ordered = sorted(
         movements,
@@ -133,6 +175,10 @@ def build_metal_inventory_view(movements, start_date=None, end_date=None, wareho
     )
     for m in ordered:
         wh = resolve_movement_warehouse(m) or UNASSIGNED_WAREHOUSE
+        cat = _metal_report_category(m.item_type)
+        if cat == METAL_OTHER_CATEGORY:
+            seen_other.add(wh)
+        key = ensure_key(wh, cat)
         day = m.movement_date
         if end_date and day and day > end_date:
             break
@@ -140,27 +186,28 @@ def build_metal_inventory_view(movements, start_date=None, end_date=None, wareho
             continue
         signed = _signed_grams(m)
         if start_date and day and day < start_date:
-            running[wh] += signed
+            running[key] += signed
             continue
         if not opening_ready:
             opening = dict(running)
             opening_ready = True
             if start_date:
                 emit_opening()
-        running[wh] += signed
+        running[key] += signed
         if signed >= 0:
-            inflow[wh] += signed
+            inflow[key] += signed
         else:
-            outflow[wh] += abs(signed)
+            outflow[key] += abs(signed)
         if m.invoice_no:
-            invoices[wh].add(m.invoice_no)
+            invoices[key].add(m.invoice_no)
         ledger_rows.append({
             "日期": _fmt_day(day),
             "單號": m.invoice_no or "",
             "倉庫": wh,
+            "品種": cat,
             "方向": "入倉" if m.direction == "in" else "出倉",
             "重量(+/-克)": round(signed, 3),
-            "累計(克)": round(running[wh], 3),
+            "累計(克)": round(running[key], 3),
             "貨品": m.item_type or "",
             "成色": m.quality or "",
             "交易性質": m.transaction_type or "",
@@ -172,21 +219,29 @@ def build_metal_inventory_view(movements, start_date=None, end_date=None, wareho
         emit_opening()
 
     if start_date is None:
-        opening = {wh: 0.0 for wh in running}
+        opening = blank_map()
+        for key in running:
+            opening.setdefault(key, 0.0)
 
     summary_rows = []
-    for wh in tracked:
-        net = inflow[wh] - outflow[wh]
-        close = opening[wh] + net
-        summary_rows.append({
-            "倉庫": wh,
-            "期初(克)": round(opening[wh], 3),
-            "入倉(克)": round(inflow[wh], 3),
-            "出倉(克)": round(outflow[wh], 3),
-            "淨額(克)": round(net, 3),
-            "期末(克)": round(close, 3),
-            "單據數": len(invoices[wh]),
-        })
+    for wh in tracked_wh:
+        cats_for_wh = list(categories)
+        if wh in seen_other:
+            cats_for_wh.append(METAL_OTHER_CATEGORY)
+        for cat in cats_for_wh:
+            key = ensure_key(wh, cat)
+            net = inflow[key] - outflow[key]
+            close = opening.get(key, 0.0) + net
+            summary_rows.append({
+                "倉庫": wh,
+                "品種": cat,
+                "期初(克)": round(opening.get(key, 0.0), 3),
+                "入倉(克)": round(inflow[key], 3),
+                "出倉(克)": round(outflow[key], 3),
+                "淨額(克)": round(net, 3),
+                "期末(克)": round(close, 3),
+                "單據數": len(invoices[key]),
+            })
     summary_df = pd.DataFrame(summary_rows, columns=SUMMARY_METAL_COLUMNS)
     ledger_df = pd.DataFrame(ledger_rows, columns=LEDGER_METAL_COLUMNS) if ledger_rows else empty_ledger_metal_df()
     return summary_df, ledger_df
@@ -314,6 +369,8 @@ def build_inventory_view(session, start_date=None, end_date=None, warehouse="全
     return {
         "summary_metal": summary_metal,
         "ledger_metal": ledger_metal,
+        "ledger_gold": filter_metal_ledger_by_category(ledger_metal, "金"),
+        "ledger_silver": filter_metal_ledger_by_category(ledger_metal, "純銀"),
         "summary_cash": summary_cash,
         "ledger_cash": ledger_cash,
     }
@@ -331,13 +388,20 @@ def export_inventory_view(session, start_date, end_date, period_label, warehouse
     output_path = REPORT_DIR / filename
 
     item_df = _build_item_detail_df(session, start_date, end_date, warehouse)
+    warehouse_df = _build_warehouse_summary_df(session)
+    if warehouse in METAL_WAREHOUSES:
+        warehouse_df = warehouse_df[warehouse_df["倉庫"] == warehouse]
+    elif warehouse == CASH_WAREHOUSE:
+        warehouse_df = warehouse_df[warehouse_df["倉庫"] == CASH_WAREHOUSE]
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         view["summary_metal"].to_excel(writer, sheet_name="倉庫進出匯總", index=False)
         view["ledger_metal"].to_excel(writer, sheet_name="倉庫累計明細", index=False)
+        view["ledger_gold"].to_excel(writer, sheet_name="金 倉庫累計明細", index=False)
+        view["ledger_silver"].to_excel(writer, sheet_name="銀 倉庫累計明細", index=False)
         view["summary_cash"].to_excel(writer, sheet_name="現金倉進出匯總", index=False)
         view["ledger_cash"].to_excel(writer, sheet_name="現金倉累計明細", index=False)
         item_df.to_excel(writer, sheet_name="倉存明細", index=False)
-        _build_warehouse_summary_df(session).to_excel(writer, sheet_name="倉庫總覽", index=False)
+        warehouse_df.to_excel(writer, sheet_name="倉庫總覽", index=False)
     return str(output_path), view
 
 
@@ -364,6 +428,7 @@ def _build_item_detail_df(session, start_date, end_date, warehouse="全部"):
             "記錄類型": _movement_kind_label(getattr(m, "movement_kind", "normal")),
             "交易性質": m.transaction_type,
             "倉庫": wh,
+            "品種": _metal_report_category(m.item_type),
             "方向": "入倉" if m.direction == "in" else "出倉",
             "重量(+/-克)": round(_signed_grams(m), 3),
             "貨品": m.item_type,
@@ -511,6 +576,41 @@ def _build_warehouse_summary_df(session):
     return pd.DataFrame(rows)
 
 
+def signed_invoice_cash_amount(payment_method, transaction_type):
+    """Cash payment amount with − for 支出 (購入單 / 交收單)."""
+    return signed_cash_warehouse_amount(
+        extract_cash_amount(payment_method or ""),
+        transaction_type,
+    )
+
+
+def append_invoice_detail_totals(df):
+    """Append 合計 row(s) for 現金金額, split by 現金貨幣 when mixed."""
+    if df is None or df.empty or "現金金額" not in df.columns:
+        return df
+    totals = {}
+    for _, row in df.iterrows():
+        try:
+            amount = float(row.get("現金金額") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        if amount == 0:
+            continue
+        currency = str(row.get("現金貨幣") or "").strip()
+        totals[currency] = round(totals.get(currency, 0.0) + amount, 2)
+    if not totals:
+        totals[""] = 0.0
+    extra = []
+    for currency in sorted(totals, key=lambda c: c or "zzz"):
+        blank = {col: "" for col in df.columns}
+        blank["單號"] = "合計"
+        blank["現金金額"] = totals[currency]
+        if currency and "現金貨幣" in df.columns:
+            blank["現金貨幣"] = currency
+        extra.append(blank)
+    return pd.concat([df, pd.DataFrame(extra)], ignore_index=True)
+
+
 def generate_invoice_report(session, start_date, end_date, period_label):
     """Generate invoice summary report for a date range (None = all records)."""
     q = session.query(Invoice)
@@ -522,6 +622,9 @@ def generate_invoice_report(session, start_date, end_date, period_label):
 
     rows = []
     for inv in invoices:
+        cash_amount = signed_invoice_cash_amount(
+            inv.payment_method or "", inv.transaction_type,
+        )
         rows.append({
             "日期": inv.transaction_date.strftime("%Y-%m-%d"),
             "單號": inv.invoice_no,
@@ -535,7 +638,7 @@ def generate_invoice_report(session, start_date, end_date, period_label):
                 inv.total_amount,
                 getattr(inv, "invoice_currency", None) or "HKD",
             ),
-            "現金金額": extract_cash_amount(inv.payment_method or ""),
+            "現金金額": cash_amount,
             "現金貨幣": extract_cash_currency(inv.payment_method or ""),
             "倉存存取": inv.source_location or "",
             "倉存位置": inv.destination_location or "",
@@ -544,7 +647,8 @@ def generate_invoice_report(session, start_date, end_date, period_label):
             "備註": inv.notes or "",
         })
 
-    df = pd.DataFrame(rows)
+    data_df = pd.DataFrame(rows)
+    df = append_invoice_detail_totals(data_df)
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     filename = (
         f"發票報表_{period_label}_{start_date}_{end_date}.xlsx"
@@ -555,10 +659,10 @@ def generate_invoice_report(session, start_date, end_date, period_label):
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="發票明細", index=False)
-        if not df.empty:
+        if not data_df.empty:
             by_type = (
-                df.groupby("交易性質")
-                .agg({"單號": "count", "金額": "sum"})
+                data_df.groupby("交易性質")
+                .agg({"單號": "count", "金額": "sum", "現金金額": "sum"})
                 .rename(columns={"單號": "數量"})
                 .reset_index()
             )

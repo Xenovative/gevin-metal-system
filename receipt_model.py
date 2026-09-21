@@ -377,8 +377,8 @@ def from_invoice_data(
             amount_display=_fmt_money(currency, amt if amt is not None else 0),
         )
         if with_stock:
-            src = (invoice_data.get(source_key) or invoice_data.get("source_location") or "").strip()
-            dst = (invoice_data.get(dest_key) or invoice_data.get("destination_location") or "").strip()
+            src = (invoice_data.get(source_key) or "").strip()
+            dst = (invoice_data.get(dest_key) or "").strip()
             if src:
                 line.stock_action = _strip_stock_label(src)
             if dst:

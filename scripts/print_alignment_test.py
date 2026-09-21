@@ -175,6 +175,11 @@ def test_purchase():
 
 def test_exchange():
     data = _base_data("ALIGN_T1", "兌料單", 80.0)
+    # 來料入倉 / 對換出倉 — exchange 庫存 must not repeat 存 A倉庫
+    data["source_location"] = ""
+    data["destination_location"] = "存 A倉庫"
+    data["exchange_source_location"] = "取 A倉庫"
+    data["exchange_destination_location"] = ""
     main = [_sample_item(80.0)]
     exchange = [{
         "item_type": "純銀 Silver",
@@ -192,6 +197,18 @@ def test_exchange():
     assert "ALIGN_T1" in str(ws.cell(row=CUSTOMER_COPY["invoice_no_row"], column=11).value)
     notes_val = ws.cell(row=CUSTOMER_COPY["notes_row"], column=5).value
     assert notes_val == "備註測試", notes_val
+
+    co = COMPANY_COPY
+    start = co["items_start"]
+    main_stock = " ".join(str(ws.cell(row=start + i, column=8).value or "") for i in range(3))
+    assert "存 A倉庫" in main_stock, main_stock
+    marker_row = start + estimate_items_block_rows(main)
+    assert ws.cell(row=marker_row, column=3).value == "對換"
+    ex_stock = "\n".join(
+        str(ws.cell(row=marker_row + 1 + i, column=8).value or "") for i in range(2)
+    )
+    assert "取 A倉庫" in ex_stock, ex_stock
+    assert "存 A倉庫" not in ex_stock, ex_stock
     print("OK 兌料", path)
 
 

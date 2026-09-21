@@ -531,12 +531,13 @@ def _write_copy(ws, layout, invoice_data, main_items, exchange_items, tx_config,
         label_row = min(next_row, layout["notes_row"] - 2)
         if label_row < layout["notes_row"]:
             _put_text(ws, label_row, 3, EXCHANGE_MARKER, font=FONT_SMALL)
+            # 對換貨品：只用對換倉位。不可回退到來料的 存 A倉庫。
             ex_source = (
                 invoice_data.get("exchange_source_location") if is_company else None
-            ) or stock_source
+            )
             ex_dest = (
                 invoice_data.get("exchange_destination_location") if is_company else None
-            ) or stock_dest
+            )
             _write_item_block(
                 ws, label_row + 1, exchange_items,
                 has_amount=has_amount,

@@ -1174,6 +1174,8 @@ def _inventory_view_payload(period, report_date, year, month, warehouse, current
     empty = (
         empty_summary_metal_df(),
         empty_ledger_metal_df(),
+        empty_ledger_metal_df(),
+        empty_ledger_metal_df(),
         empty_summary_cash_df(),
         empty_ledger_cash_df(),
         None,
@@ -1206,6 +1208,8 @@ def _inventory_view_payload(period, report_date, year, month, warehouse, current
         msg,
         view["summary_metal"],
         view["ledger_metal"],
+        view["ledger_gold"],
+        view["ledger_silver"],
         view["summary_cash"],
         view["ledger_cash"],
         inv_path,
@@ -1970,12 +1974,22 @@ def build_app():
                         yearly_btn = gr.Button("📈 每年報表")
                     report_msg = gr.Textbox(label="查閱／報表結果", interactive=False, lines=4)
                     inv_summary_metal = gr.Dataframe(
-                        label="倉庫進出匯總（期初／入／出／期末）",
+                        label="倉庫進出匯總（金／純銀分列：期初／入／出／期末）",
                         value=empty_summary_metal_df(),
                         interactive=False,
                     )
                     inv_ledger_metal = gr.Dataframe(
                         label="倉庫累計明細（日期、單號、重量 +/-、累計）",
+                        value=empty_ledger_metal_df(),
+                        interactive=False,
+                    )
+                    inv_ledger_gold = gr.Dataframe(
+                        label="金 倉庫累計明細",
+                        value=empty_ledger_metal_df(),
+                        interactive=False,
+                    )
+                    inv_ledger_silver = gr.Dataframe(
+                        label="銀 倉庫累計明細",
                         value=empty_ledger_metal_df(),
                         interactive=False,
                     )
@@ -2033,6 +2047,8 @@ def build_app():
                         report_msg,
                         inv_summary_metal,
                         inv_ledger_metal,
+                        inv_ledger_gold,
+                        inv_ledger_silver,
                         inv_summary_cash,
                         inv_ledger_cash,
                         report_inv_file,
