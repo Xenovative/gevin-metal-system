@@ -1,8 +1,9 @@
 """
 Fill templates/invoice_template.xlsx with live invoice data.
 
-Copies the branded dual-copy workbook (銷售 / 購入單 / 兌料單 / 交收單),
+Copies the branded dual-copy workbook (銷售 / 購入 / 兌料 / 交收),
 clears sample cells, then writes this invoice into the matching sheet.
+Values only: template fonts, alignment, row heights, column widths, and merges stay.
 Print at 100% A4 — never Fit-to-Page.
 """
 from __future__ import annotations
@@ -298,19 +299,21 @@ def _style_cell(cell, font=None, align=None, num_fmt=None):
 
 
 def _put_text(ws, row, col, value, font=None, align=None):
+    """Write the value only. Keep the template font, alignment, and size."""
+    del font, align
     if value is None or value == "":
         return
     cell = _anchor_cell(ws, row, col)
     cell.value = value
-    _style_cell(cell, font=font, align=align or ALIGN_LEFT_CLIP)
 
 
 def _put_number(ws, row, col, value, font=None, align=None, num_fmt=None):
+    """Write the number only. Keep the template font, alignment, and number format."""
+    del font, align, num_fmt
     if value is None or value == "":
         return
     cell = _anchor_cell(ws, row, col)
     cell.value = float(value)
-    _style_cell(cell, font=font, align=align, num_fmt=num_fmt)
 
 
 def _parse_tx_date(tx_date):
@@ -439,7 +442,6 @@ def _write_item_block(
             if source:
                 cell = _anchor_cell(ws, row - 1, 8)
                 cell.value = f"{source}\n{destination}"
-                _style_cell(cell, font=FONT_SMALL, align=ALIGN_LEFT_CLIP)
             else:
                 _put_text(
                     ws, row - 1, 8, destination,
@@ -600,11 +602,13 @@ def _write_copy(ws, layout, invoice_data, main_items, exchange_items, tx_config,
     )
 
 
-def generate_invoice_excel(invoice_data, main_items, exchange_items=None):
+def generate_invoice_excel(invoice_data, main_items, exchange_items=None, dest_path=None):
     """
     Copy invoice_template.xlsx and fill the matching sheet with this invoice.
 
-    Returns the absolute path of output/invoices/{invoice_no}.xlsx.
+    Returns the absolute path of the written workbook. Default location is
+    output/invoices/{invoice_no}.xlsx. dest_path writes a staging file instead
+    so a failed save cannot replace an invoice that another user already stored.
     """
     tx_type = invoice_data["transaction_type"]
     tx_config = TRANSACTION_TYPES[tx_type]
@@ -620,7 +624,11 @@ def generate_invoice_excel(invoice_data, main_items, exchange_items=None):
         invoice_data["print_warning"] = overflow_warning
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = OUTPUT_DIR / f"{invoice_data['invoice_no']}.xlsx"
+    if dest_path:
+        output_path = Path(dest_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        output_path = OUTPUT_DIR / f"{invoice_data['invoice_no']}.xlsx"
     shutil.copy(TEMPLATE_PATH, output_path)
 
     wb = load_workbook(output_path)
@@ -637,7 +645,6 @@ def generate_invoice_excel(invoice_data, main_items, exchange_items=None):
     _clear_copy_variables(ws, CUSTOMER_COPY)
     _clear_copy_variables(ws, _company_layout())
     _apply_print_settings(ws, preserve_margins=True)
-    _unmerge_weight_header_boxes(ws)
 
     tx_date = _parse_tx_date(invoice_data["transaction_date"])
     _write_copy(

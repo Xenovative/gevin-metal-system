@@ -164,7 +164,7 @@ def check_core_smoke():
     ]
     path = Path(generate_invoice_excel(data, items))
     assert path.exists()
-    ws = load_workbook(path)["購入單"]
+    ws = load_workbook(path)["購入"]
     assert ws.cell(10, 11).value == -100
     stock = str(ws.cell(37, 8).value or "")
     assert "倉存存取" not in stock
@@ -176,7 +176,7 @@ def check_core_smoke():
     assert cm["direction"] == "out"
 
     payload = m.load_review_page()
-    assert len(payload) == 8
+    assert len(payload) == 9
     from sqlalchemy import text
     journal = m.session.execute(text("PRAGMA journal_mode")).scalar()
     assert str(journal).lower() == "wal", journal

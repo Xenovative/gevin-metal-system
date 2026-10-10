@@ -50,7 +50,10 @@ def main():
         "amount": 500,
     }]
     path = generate_invoice_excel(data, items)
-    ws = load_workbook(path)["購入單"]
+    ws = load_workbook(path)["購入"]
+    assert abs(float(ws.row_dimensions[1].height or 0) - 45.6) < 0.05
+    assert "C10:D10" in {str(r).replace("$", "") for r in ws.merged_cells.ranges}
+    assert ws["C10"].font.name == "Microsoft JhengHei UI"
     assert ws.cell(10, 11).value == -500, ws.cell(10, 11).value
     assert ws.cell(37, 11).value == -500, ws.cell(37, 11).value
     assert ws.cell(21, 11).value == -500, ws.cell(21, 11).value
@@ -67,7 +70,7 @@ def main():
 
     payload = m.load_review_page()
     # safe_summary, stock, movements, pick, invoice_no, items, excel, msg
-    assert len(payload) == 8, len(payload)
+    assert len(payload) == 9, len(payload)
 
     text = Path(db.__file__).read_text(encoding="utf-8")
     assert text.count('"inventory_movements": [') == 1
@@ -133,6 +136,29 @@ def main():
         cash_movement=None, created_by_user_id=1,
     )
     m.session.commit()
+    dup_msg, dup_file, _dup_table = m.submit_invoice(
+        "購入單", live_no, "Second Staff", "", tx_day.isoformat(), "Staff",
+        [], None, None, None, None,
+        "HKD", "存", "A倉庫", None,
+        "", None, "[]", "[]", admin,
+    )
+    assert "單號重複" in dup_msg, dup_msg
+    assert dup_file is None
+    assert m.session.query(db.Invoice).filter_by(invoice_no=live_no).count() == 1
+    from config import OUTPUT_DIR
+    assert not list(OUTPUT_DIR.glob(f".{live_no}.*.partial.xlsx"))
+    refreshed = m.submit_and_refresh(
+        "購入單", live_no, "Second Staff", "", tx_day.isoformat(), "Staff",
+        [], None, None, None, None,
+        "HKD", "存", "A倉庫", None,
+        "", None, "[]", "[]", admin,
+    )
+    assert "單號重複" in refreshed[0]
+    next_box = refreshed[2]
+    next_val = next_box.get("value") if isinstance(next_box, dict) else getattr(next_box, "value", next_box)
+    assert next_val and next_val != live_no, next_val
+    print("OK duplicate invoice number asks to refresh", next_val)
+
     msg, header, items, moves, excel = m.run_lookup_order(live_no, admin)
     assert msg.startswith("✅"), msg
     assert header.iloc[0]["狀態"] == "有效"

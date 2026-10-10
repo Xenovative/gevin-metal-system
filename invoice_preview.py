@@ -32,30 +32,21 @@ def build_pdf_preview_html(
     excel_name: str = "",
 ) -> str:
     """
-    Embed the real receipt PDF in Invoice Review step 4.
-    Uses a base64 data-URI iframe so Gradio can show it without a public file URL.
+    Embed the receipt PDF in Invoice Review.
+    The iframe loads /invoice-print/<file> on this server so Safari and Windows can print it.
     """
     path = Path(pdf_path)
     if not path.exists():
         return (
             "<div class='preview-wrap'>"
-            f"<p>❌ 找不到 PDF：{_esc(path.name)}。請再按「預覽」重新生成。</p>"
-            "</div>"
-        )
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        return (
-            "<div class='preview-wrap'>"
-            f"<p>❌ 無法讀取 PDF：{_esc(exc)}</p>"
+            f"<p>❌ 找不到 PDF：{_esc(path.name)}。請再按「預覽並列印」重新生成。</p>"
             "</div>"
         )
 
-    b64 = base64.b64encode(raw).decode("ascii")
-    data_uri = f"data:application/pdf;base64,{b64}"
     inv = invoice_no or path.stem
     excel_bit = f"｜Excel {_esc(excel_name)}" if excel_name else ""
     pdf_bit = f"｜PDF {_esc(path.name)}"
+    src = f"/invoice-print/{path.name}#toolbar=1&navpanes=0&view=FitH"
 
     return f"""
 <div class="preview-wrap">
@@ -65,12 +56,13 @@ def build_pdf_preview_html(
   </div>
   <div class="pdf-frame">
     <iframe
+      id="gevin-receipt-pdf"
       title="Receipt PDF {_esc(path.name)}"
-      src="{data_uri}#toolbar=1&navpanes=0&view=FitH"
+      src="{src}"
       type="application/pdf"
     ></iframe>
   </div>
-  <p class="pdf-hint">若瀏覽器無法內嵌 PDF，請於步驟 5 下載 PDF 後開啟。</p>
+  <p class="pdf-hint">按「列印」開啟此 PDF 的瀏覽器列印視窗（iPad Safari 與 Windows 皆可用）。Excel 檔仍保存在伺服器，可於下方下載。</p>
 </div>
 <style>
 .preview-wrap {{ font-family: "Microsoft JhengHei", "Segoe UI", sans-serif; }}

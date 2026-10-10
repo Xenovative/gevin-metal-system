@@ -9,7 +9,6 @@ from openpyxl import load_workbook
 
 from cash import signed_cash_warehouse_amount
 from invoice_excel_generator import (
-    COL_WIDTHS,
     COMPANY_COPY,
     CUSTOMER_COPY,
     PRINT_AREA,
@@ -17,6 +16,16 @@ from invoice_excel_generator import (
     fit_items_for_print,
     generate_invoice_excel,
 )
+
+
+def _merged_value(ws, row, col):
+    cell = ws.cell(row=row, column=col)
+    if cell.value not in (None, ""):
+        return cell.value
+    for rng in ws.merged_cells.ranges:
+        if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
+            return ws.cell(row=rng.min_row, column=rng.min_col).value
+    return cell.value
 
 
 FORBIDDEN_LABELS = (
@@ -66,14 +75,17 @@ def _assert_a4(ws):
     area = (ws.print_area or "").replace("$", "")
     assert PRINT_AREA.replace("$", "") in area or "A1:K50" in area
     merged = {str(r).replace("$", "") for r in ws.merged_cells.ranges}
+    assert "C10:D10" in merged
+    assert "F21:G21" in merged
     for ref in ("F8:G8", "F9:G9", "F35:G35", "F36:G36"):
         assert ref not in merged, f"weight header still merged: {ref}"
-    for letter, width in COL_WIDTHS.items():
-        actual = float(ws.column_dimensions[letter].width or 0)
-        assert abs(actual - width) < 0.05, (letter, actual, width)
-    assert abs(float(ws.row_dimensions[21].height or 0) - 27.75) < 0.05
-    assert abs(float(ws.row_dimensions[45].height or 0) - 27.75) < 0.05
-    assert abs(float(ws.row_dimensions[37].height or 0) - 24.75) < 0.05
+    # New template geometry must survive the fill (no hardcoded overlay).
+    assert abs(float(ws.column_dimensions["C"].width or 0) - 15.83) < 0.05
+    assert abs(float(ws.row_dimensions[1].height or 0) - 45.6) < 0.05
+    assert abs(float(ws.row_dimensions[10].height or 0) - 21.95) < 0.05
+    assert abs(float(ws.row_dimensions[21].height or 0) - 29.85) < 0.05
+    assert abs(float(ws.row_dimensions[37].height or 0) - 24.6) < 0.05
+    assert abs(float(ws.row_dimensions[45].height or 0) - 32.25) < 0.05
 
 
 def _assert_no_static_labels(ws):
@@ -92,11 +104,16 @@ def _assert_copy_cells(ws, layout, invoice_no, customer, signed_total, currency,
     assert ws.cell(row=layout["info_row"], column=5).value == customer
     assert ws.cell(row=layout["info_row"], column=3).value == "客戶 Customer :"
     assert str(ws.cell(row=layout["total_row"], column=3).value or "").startswith("付款方式")
-    assert abs(float(ws.row_dimensions[layout["total_row"]].height or 0) - 27.75) < 0.05
+    expected_total_h = 29.85 if layout["total_row"] == CUSTOMER_COPY["total_row"] else 32.25
+    assert abs(float(ws.row_dimensions[layout["total_row"]].height or 0) - expected_total_h) < 0.05
     assert ws.cell(row=layout["items_start"], column=3).value  # item type
     assert ws.cell(row=layout["handler_row"], column=6).value == handler
     assert ws.cell(row=layout["handler_row"] - 1, column=6).value == "經手人 Handler:"
-    label = str(ws.cell(row=layout["invoice_no_row"], column=10).value or "")
+    label = ""
+    for col in (8, 9, 10):
+        label = str(_merged_value(ws, layout["invoice_no_row"], col) or "")
+        if label:
+            break
     assert "單" in label or "Invoice" in label or "Note" in label, label
     assert ws.cell(row=layout["info_row"], column=7).value == "91234567"
     assert ws.cell(row=layout["items_start"] - 3, column=3).value == "貨品"
@@ -105,7 +122,7 @@ def _assert_copy_cells(ws, layout, invoice_no, customer, signed_total, currency,
     assert weight_en in ("Weight", "Gross"), weight_en
     is_company = layout["items_start"] > CUSTOMER_COPY["items_start"]
     if is_company:
-        assert abs(float(ws.row_dimensions[layout["items_start"]].height or 0) - 24.75) < 0.05
+        assert abs(float(ws.row_dimensions[layout["items_start"]].height or 0) - 24.6) < 0.05
     hdr_stock = ws.cell(row=layout["items_start"] - 3, column=8).value
     en_stock = ws.cell(row=layout["items_start"] - 2, column=8).value
     if is_company:
@@ -122,8 +139,10 @@ def _assert_copy_cells(ws, layout, invoice_no, customer, signed_total, currency,
         ws.cell(row=layout["items_start"] - 2, column=11).value
         or ws.cell(row=layout["items_start"] - 2, column=10).value
     )
-    assert cash_cn in (None, ""), cash_cn
-    assert cash_en in (None, ""), cash_en
+    assert cash_cn in (None, "", "金額"), cash_cn
+    assert cash_en in (None, "", "Amount"), cash_en
+    assert "現金倉" not in str(cash_cn or "")
+    assert "Cash Warehouse" not in str(cash_en or "")
     if has_amount:
         assert ws.cell(row=layout["total_row"], column=10).value == currency
         assert float(ws.cell(row=layout["total_row"], column=11).value) == float(signed_total)
@@ -159,7 +178,7 @@ def test_purchase():
     data["destination_location"] = "存 A倉庫"
     items = [{**_sample_item(200.0), "amount": 200.0, "unit_price": 20}]
     path = generate_invoice_excel(data, items)
-    ws = load_workbook(path)["購入單"]
+    ws = load_workbook(path)["購入"]
     _assert_a4(ws)
     _assert_no_static_labels(ws)
     signed = signed_cash_warehouse_amount(200.0, "購入單")
@@ -191,7 +210,7 @@ def test_exchange():
         "amount": None,
     }]
     path = generate_invoice_excel(data, main, exchange)
-    ws = load_workbook(path)["兌料單"]
+    ws = load_workbook(path)["兌料"]
     _assert_a4(ws)
     _assert_no_static_labels(ws)
     assert "ALIGN_T1" in str(ws.cell(row=CUSTOMER_COPY["invoice_no_row"], column=11).value)
@@ -225,7 +244,7 @@ def test_delivery():
         "amount": None,
     }]
     path = generate_invoice_excel(data, items)
-    ws = load_workbook(path)["交收單"]
+    ws = load_workbook(path)["交收"]
     _assert_a4(ws)
     _assert_no_static_labels(ws)
     assert "ALIGN_D1" in str(ws.cell(row=CUSTOMER_COPY["invoice_no_row"], column=11).value)

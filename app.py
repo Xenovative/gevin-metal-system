@@ -6,6 +6,7 @@
 import json
 import logging
 import os
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 
@@ -540,6 +541,14 @@ def submit_invoice(
     if validation_error:
         return f"❌ {validation_error}", None, _items_to_table([])
 
+    from database import Invoice
+    if session.query(Invoice.id).filter(Invoice.invoice_no == invoice_no).first():
+        return (
+            f"❌ 單號重複：{invoice_no}，請重新整理後再試",
+            None,
+            _items_to_table([]),
+        )
+
     main_items = parse_line_items_json(main_items_json)
     exchange_items = parse_line_items_json(exchange_items_json)
     if not main_items:
@@ -599,13 +608,18 @@ def submit_invoice(
         ),
     }
 
+    final_excel = OUTPUT_DIR / f"{invoice_no}.xlsx"
+    staging_excel = OUTPUT_DIR / f".{invoice_no}.{uuid.uuid4().hex}.partial.xlsx"
+    committed = False
     try:
-        excel_path = generate_invoice_excel(
+        generate_invoice_excel(
             invoice_data, main_items,
             exchange_items if exchange_items else None,
+            dest_path=staging_excel,
         )
-        # Persist portable relative name; keep absolute path for Gradio download
-        invoice_data["excel_path"] = Path(excel_path).name
+        # Store the final name. The file is moved into place only after commit,
+        # so a duplicate-number failure cannot replace the first user's workbook.
+        invoice_data["excel_path"] = final_excel.name
         movements = build_inventory_movements(
             tx_type, main_items, exchange_items or None,
             main_source_location=source_location,
@@ -622,7 +636,10 @@ def submit_invoice(
         )
         log_audit(session, current_user, "create_invoice", "invoice", invoice_no)
         session.commit()
+        committed = True
         session.expire_all()
+        os.replace(staging_excel, final_excel)
+        excel_path = str(final_excel.resolve())
 
         from invoice_generator import format_cash_warehouse_amount
 
@@ -674,11 +691,28 @@ def submit_invoice(
             msg += f"\n⚠️ {invoice_data['print_warning']}"
         return msg, excel_path, _items_to_table(main_items)
     except Exception as e:
-        session.rollback()
+        if not committed:
+            session.rollback()
+            try:
+                staging_excel.unlink(missing_ok=True)
+            except Exception:
+                logger.exception("Could not remove staging workbook %s", staging_excel)
         logger.exception("Invoice create failed for %s", invoice_no)
         err = str(e)
         if "UNIQUE" in err.upper() or "unique" in err.lower():
             return f"❌ 單號重複：{invoice_no}，請重新整理後再試", None, _items_to_table(main_items)
+        if committed and staging_excel.exists():
+            try:
+                os.replace(staging_excel, final_excel)
+            except Exception:
+                logger.exception("Retry publish failed for %s", invoice_no)
+        if committed and final_excel.exists():
+            excel_path = str(final_excel.resolve())
+            return (
+                f"✅ 發票已成功生成！\n單號：{invoice_no}\n檔案：{excel_path}",
+                excel_path,
+                _items_to_table(main_items),
+            )
         return f"❌ 生成失敗：{e}", None, _items_to_table(main_items)
 
 
@@ -713,6 +747,16 @@ def submit_and_refresh(
             gr.update(value=next_no), banner,
             "", "", "[]", empty, "[]", empty, "", None,
             *_reset_payment_fields(),
+        )
+    if "單號重複" in msg:
+        next_no = get_next_invoice_number(session, tx_type, tx_date) if tx_type else ""
+        return (
+            msg, excel_path,
+            gr.update(value=next_no), _invoice_no_banner(next_no, tx_type),
+            customer_name, customer_phone, main_items_json, table,
+            exchange_items_json, _items_to_table(parse_line_items_json(exchange_items_json)),
+            notes, note_amount,
+            gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
         )
     return (
         msg, excel_path,
@@ -865,6 +909,7 @@ def _empty_review_payload(message=""):
         gr.update(choices=[], value=None),
         "",
         gr.update(value=_empty_review_items_df()),
+        "<p></p>",
         None,  # Excel
         message or "",
     )
@@ -900,6 +945,7 @@ def load_review_page():
         gr.update(choices=nos, value=(latest or None)),
         latest,
         gr.update(value=_empty_review_items_df()),
+        "<p></p>",
         None,  # Excel
         f"✅ {count_msg}" if nos else "⚠️ 尚無發票資料。請先在「開立發票」建立單據後再刷新。",
     )
@@ -1028,6 +1074,7 @@ def _on_main_tabs_select(evt: gr.SelectData, current_user):
         gr.update(),
         gr.update(),
         gr.update(),
+        gr.update(),
     )
 
 def run_preview_invoice(invoice_no, current_user):
@@ -1039,18 +1086,19 @@ def run_preview_invoice(invoice_no, current_user):
     from config import TRANSACTION_TYPES
 
     empty_items = _empty_review_items_df()
+    blank_preview = "<p></p>"
     err = require_view_inventory(current_user)
     if err:
-        return empty_items, None, err
+        return empty_items, blank_preview, None, err
 
     invoice_no = (invoice_no or "").strip()
     if not invoice_no:
-        return empty_items, None, "❌ 請先輸入或選擇單號"
+        return empty_items, blank_preview, None, "❌ 請先輸入或選擇單號"
 
     _refresh_db_view()
     invoice = session.query(Invoice).filter(Invoice.invoice_no == invoice_no).first()
     if not invoice:
-        return empty_items, None, f"❌ 找不到單號「{invoice_no}」"
+        return empty_items, blank_preview, None, f"❌ 找不到單號「{invoice_no}」"
 
     lines = (
         session.query(InvoiceLineItem)
@@ -1133,12 +1181,25 @@ def run_preview_invoice(invoice_no, current_user):
         )
 
     excel_name = Path(print_file).name if print_file else ""
+    preview_html = blank_preview
     if print_file and Path(print_file).exists():
-        msg = f"✅ 已載入 {invoice_no} 發票 Excel（{excel_name}）。請下載後以 A4 品牌紙直接列印。"
+        msg = f"✅ 已載入 {invoice_no}。Excel 已存在伺服器（{excel_name}）。請看下方 PDF 預覽後按「列印」。"
         if invoice_data.get("print_warning"):
             msg += f"\n⚠️ {invoice_data['print_warning']}"
         if excel_error:
             msg = f"⚠️ 重新生成失敗（{excel_error}）；已提供既有 Excel：{excel_name}"
+        preview_html = _pdf_preview_html(
+            print_file,
+            invoice_no=invoice_no,
+            tx_type=invoice.transaction_type or "",
+            status=_invoice_status_label(invoice.status),
+            excel_name=excel_name,
+        )
+        if "PDF 預覽暫時無法產生" in preview_html:
+            msg = (
+                f"⚠️ Excel 已存在伺服器（{excel_name}）。"
+                "PDF 預覽需要伺服器上的 LibreOffice。"
+            )
     else:
         msg = "⚠️ 找不到發票 Excel。" + (f" 生成錯誤：{excel_error}" if excel_error else "")
 
@@ -1155,7 +1216,52 @@ def run_preview_invoice(invoice_no, current_user):
     except Exception:
         session.rollback()
 
-    return items_df, print_file, msg
+    return items_df, preview_html, print_file, msg
+
+
+def _pdf_preview_html(excel_path, *, invoice_no, tx_type, status, excel_name):
+    """Convert the stored workbook to PDF and embed it for in-page print."""
+    import html as html_lib
+
+    from excel_to_pdf import export_excel_to_pdf
+    from invoice_preview import build_pdf_preview_html
+
+    try:
+        pdf_path = export_excel_to_pdf(excel_path)
+    except Exception as exc:
+        logger.exception("PDF preview failed for %s", invoice_no)
+        return (
+            "<div class='preview-wrap'><p>Excel 已儲存在伺服器。"
+            f"PDF 預覽暫時無法產生：{html_lib.escape(str(exc))}。"
+            "請下載 Excel。</p></div>"
+        )
+    return build_pdf_preview_html(
+        pdf_path,
+        invoice_no=invoice_no,
+        tx_type=tx_type,
+        status=status,
+        excel_name=excel_name,
+    )
+
+
+_PRINT_PDF_JS = """
+() => {
+  const frame = document.getElementById('gevin-receipt-pdf');
+  const src = frame && (frame.getAttribute('src') || frame.src);
+  if (!src) {
+    alert('請先按「預覽並列印」產生預覽');
+    return;
+  }
+  const w = window.open(src, '_blank');
+  if (!w) {
+    alert('請允許彈出視窗後再按列印');
+    return;
+  }
+  const kick = () => { try { w.focus(); w.print(); } catch (e) {} };
+  w.addEventListener('load', kick);
+  setTimeout(kick, 800);
+}
+"""
 
 
 def run_daily_report(report_date, current_user):
@@ -1793,7 +1899,7 @@ def build_app():
                 # ── Tab 2: Invoice Review（固定順序）──
                 with gr.Tab("🔎 發票查閱 Invoice Review", visible=False) as inventory_tab:
                     gr.Markdown(
-                        "依序操作：**1 倉存管理 → 2 進出倉記錄 → 3 單號 → 4 載入 Excel 列印**\n\n"
+                        "依序操作：**1 倉存管理 → 2 進出倉記錄 → 3 單號 → 4 預覽並列印**\n\n"
                         "在「開立發票」按 **生成發票 Excel** 後，本頁 **各倉庫總額／進出倉** 會自動從資料庫更新；"
                         "亦可按 **🔄 刷新** 或重新點開本分頁。"
                     )
@@ -1832,7 +1938,7 @@ def build_app():
                             placeholder="例：S260700001",
                             info="可手動輸入，或由上方記錄／下拉帶入",
                         )
-                        preview_btn = gr.Button("4. 載入 Excel", variant="primary")
+                        preview_btn = gr.Button("預覽並列印", variant="primary")
 
                     review_items_table = gr.Dataframe(
                         label="貨品明細",
@@ -1842,14 +1948,20 @@ def build_app():
                     )
                     review_msg = gr.Textbox(label="查閱狀態", interactive=False, lines=2)
 
-                    gr.Markdown("### 4. Print（列印／下載 Excel）")
+                    gr.Markdown("### 4. 預覽並列印")
                     gr.Markdown(
-                        "現場列印請下載 **Excel**，以 **A4 品牌收據紙** 直接列印（100% 比例，勿 Fit to Page）。"
+                        "按 **預覽並列印** 後，伺服器保存 Excel，並在頁面顯示同一份單的 PDF。"
+                        "按 **列印** 使用瀏覽器列印視窗（iPad Safari 與 Windows）。"
+                        "Excel 是留在伺服器上的列印原稿。"
                     )
-                    review_print_file = gr.File(label="下載／列印發票 Excel")
+                    review_print_preview = gr.HTML()
+                    print_pdf_btn = gr.Button("列印")
+                    review_print_file = gr.File(label="下載發票 Excel（伺服器原稿）")
+                    print_pdf_btn.click(lambda: None, None, None, js=_PRINT_PDF_JS)
 
                     review_preview_outputs = [
                         review_items_table,
+                        review_print_preview,
                         review_print_file,
                         review_msg,
                     ]
@@ -1860,6 +1972,7 @@ def build_app():
                         review_invoice_pick,
                         review_invoice_no,
                         review_items_table,
+                        review_print_preview,
                         review_print_file,
                         review_msg,
                     ]
@@ -2170,7 +2283,33 @@ def build_app():
             ],
         )
 
+    _mount_invoice_print(demo)
     return demo
+
+
+def _mount_invoice_print(demo):
+    """Serve the preview PDF on the same origin so iPad and Windows can print it."""
+    from fastapi import HTTPException
+    from fastapi.responses import FileResponse
+
+    @demo.app.get("/invoice-print/{filename}")
+    def invoice_print_pdf(filename: str):
+        safe_name = Path(filename).name
+        if safe_name != filename or not safe_name.lower().endswith(".pdf"):
+            raise HTTPException(status_code=404)
+        path = (OUTPUT_DIR / safe_name).resolve()
+        try:
+            path.relative_to(OUTPUT_DIR.resolve())
+        except ValueError:
+            raise HTTPException(status_code=404)
+        if not path.is_file():
+            raise HTTPException(status_code=404)
+        return FileResponse(
+            path,
+            media_type="application/pdf",
+            content_disposition_type="inline",
+            filename=safe_name,
+        )
 
 
 if __name__ == "__main__":
