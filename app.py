@@ -136,7 +136,25 @@ def _tab_visibility_for_user(user):
     )
 
 
-def do_login(username, password):
+def _server_today():
+    """Calendar day on this server. A new login after midnight gets the new day."""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _login_date_fields(tx_type, today):
+    """Date plus a matching invoice number when a transaction type is already chosen."""
+    if not tx_type:
+        return gr.update(value=today), gr.update(), gr.update()
+    invoice_no = get_next_invoice_number(session, tx_type, today)
+    return (
+        gr.update(value=today),
+        gr.update(value=invoice_no),
+        _invoice_no_banner(invoice_no, tx_type),
+    )
+
+
+def do_login(username, password, tx_type=None):
+    unchanged_date = (gr.update(), gr.update(), gr.update())
     fail_login = (
         None,
         "❌ 帳號或密碼錯誤",
@@ -150,7 +168,7 @@ def do_login(username, password):
     try:
         user = authenticate(session, username, password)
         if not user:
-            return (*fail_login, *fail_review)
+            return (*fail_login, *fail_review, *unchanged_date)
         log_audit(session, user, "login")
         session.commit()
     except Exception as exc:
@@ -164,7 +182,7 @@ def do_login(username, password):
             *_tab_visibility_for_user(None),
             "",
         )
-        return (*fail_exc, *fail_review)
+        return (*fail_exc, *fail_review, *unchanged_date)
     role_label = "Admin" if is_admin(user) else "員工"
     login_ok = (
         user,
@@ -180,7 +198,7 @@ def do_login(username, password):
         review = load_review_page()
     else:
         review = _empty_review_payload("❌ 您沒有權限執行此操作")
-    return (*login_ok, *review)
+    return (*login_ok, *review, *_login_date_fields(tx_type, _server_today()))
 
 
 def _show_user_info_text(user):
@@ -768,15 +786,17 @@ def submit_and_refresh(
     )
 
 
-def start_new_invoice(tx_type, tx_date):
-    """開立新發票：重新分配單號並清空表單。"""
-    invoice_no = get_next_invoice_number(session, tx_type, tx_date) if tx_type else ""
+def start_new_invoice(tx_type):
+    """開立新發票：用伺服器今天的日期重新分配單號並清空表單。"""
+    today = _server_today()
+    invoice_no = get_next_invoice_number(session, tx_type, today) if tx_type else ""
     empty = _items_to_table([])
     return (
         gr.update(value=invoice_no),
         _invoice_no_banner(invoice_no, tx_type),
         "", "", empty, "[]", empty, "[]", "", None, "",
         *_reset_payment_fields(),
+        gr.update(value=today),
     )
 
 
@@ -1885,7 +1905,7 @@ def build_app():
                         ],
                     )
                     new_invoice_btn.click(
-                        start_new_invoice, [tx_type, tx_date],
+                        start_new_invoice, [tx_type],
                         [
                             invoice_no, invoice_no_banner,
                             customer_name, customer_phone, main_items_table, main_items_json,
@@ -1893,6 +1913,7 @@ def build_app():
                             notes, note_amount, result_msg,
                             payment_methods, pay_amt_cash, pay_amt_transfer, pay_amt_cheque, pay_amt_other,
                             invoice_currency,
+                            tx_date,
                         ],
                     )
 
@@ -2267,11 +2288,12 @@ def build_app():
 
         login_btn.click(
             do_login,
-            [login_username, login_password],
+            [login_username, login_password, tx_type],
             [
                 current_user, login_msg, login_panel, main_app, handler,
                 invoice_tab, inventory_tab, reports_tab, admin_tab, user_info,
                 *review_outputs,
+                tx_date, invoice_no, invoice_no_banner,
             ],
         )
         logout_btn.click(
