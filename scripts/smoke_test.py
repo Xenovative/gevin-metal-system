@@ -50,10 +50,11 @@ def main():
         "amount": 500,
     }]
     path = generate_invoice_excel(data, items)
-    ws = load_workbook(path)["購入"]
+    ws = load_workbook(path)["購入單"]
     assert abs(float(ws.row_dimensions[1].height or 0) - 45.6) < 0.05
-    assert "C10:D10" in {str(r).replace("$", "") for r in ws.merged_cells.ranges}
-    assert ws["C10"].font.name == "Microsoft JhengHei UI"
+    assert "H3:J3" in {str(r).replace("$", "") for r in ws.merged_cells.ranges}
+    assert ws["C10"].font.name == "Microsoft JhengHei"
+    assert abs(float(ws["C10"].font.size or 0) - 10) < 0.1
     assert ws.cell(10, 11).value == -500, ws.cell(10, 11).value
     assert ws.cell(37, 11).value == -500, ws.cell(37, 11).value
     assert ws.cell(21, 11).value == -500, ws.cell(21, 11).value

@@ -122,7 +122,7 @@ SAFE_SUMMARY_CATEGORIES = ["金", "純銀"]
 # invoice_label: 單號前之中英文標籤（寫入 Excel J3/J30）
 TRANSACTION_TYPES = {
     "銷售單": {
-        "sheet": "銷售",
+        "sheet": "銷售單",
         "prefix": "S",
         "number_label": "Invoice No.",
         "invoice_label": "銷售單 Sales Invoice:",
@@ -133,7 +133,7 @@ TRANSACTION_TYPES = {
         "description": "銷售金屬給客戶，金屬出倉",
     },
     "購入單": {
-        "sheet": "購入",
+        "sheet": "購入單",
         "prefix": "P",
         "number_label": "Invoice No.",
         "invoice_label": "購入單 Purchase Invoice:",
@@ -144,7 +144,7 @@ TRANSACTION_TYPES = {
         "description": "向供應商購入金屬，金屬入倉",
     },
     "兌料單": {
-        "sheet": "兌料",
+        "sheet": "兌料單",
         "prefix": "T",
         "number_label": "Invoice No.",
         "invoice_label": "兌料單 Exchange Invoice:",
@@ -155,7 +155,7 @@ TRANSACTION_TYPES = {
         "description": "客戶來料兌換新貨，需填寫「對換貨品」",
     },
     "交收單": {
-        "sheet": "交收",
+        "sheet": "交收單",
         "prefix": "D",
         "number_label": "編號 No.",
         "invoice_label": "交收單 Delivery Note:",

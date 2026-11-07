@@ -164,7 +164,7 @@ def check_core_smoke():
     ]
     path = Path(generate_invoice_excel(data, items))
     assert path.exists()
-    ws = load_workbook(path)["購入"]
+    ws = load_workbook(path)["購入單"]
     assert ws.cell(10, 11).value == -100
     stock = str(ws.cell(37, 8).value or "")
     assert "倉存存取" not in stock

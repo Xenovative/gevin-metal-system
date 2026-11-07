@@ -52,7 +52,7 @@ def _fixture():
 
 
 def _assert_excel(path: Path):
-    ws = load_workbook(path)["銷售"]
+    ws = load_workbook(path)["銷售單"]
     assert ws.cell(CUSTOMER_COPY["items_start"], 3).value == "足金 Pure Gold"
     assert float(ws.cell(CUSTOMER_COPY["items_start"], 11).value) == 0
     assert ws.cell(CUSTOMER_COPY["total_row"], 10).value == "HKD"

@@ -75,12 +75,13 @@ def _assert_a4(ws):
     area = (ws.print_area or "").replace("$", "")
     assert PRINT_AREA.replace("$", "") in area or "A1:K50" in area
     merged = {str(r).replace("$", "") for r in ws.merged_cells.ranges}
-    assert "C10:D10" in merged
+    assert "H3:J3" in merged
+    assert "E5:F5" in merged
     assert "F21:G21" in merged
     for ref in ("F8:G8", "F9:G9", "F35:G35", "F36:G36"):
         assert ref not in merged, f"weight header still merged: {ref}"
     # New template geometry must survive the fill (no hardcoded overlay).
-    assert abs(float(ws.column_dimensions["C"].width or 0) - 15.83) < 0.05
+    assert abs(float(ws.column_dimensions["C"].width or 0) - 15.875) < 0.05
     assert abs(float(ws.row_dimensions[1].height or 0) - 45.6) < 0.05
     assert abs(float(ws.row_dimensions[10].height or 0) - 21.95) < 0.05
     assert abs(float(ws.row_dimensions[21].height or 0) - 29.85) < 0.05
@@ -157,7 +158,7 @@ def test_sales():
     data = _base_data("ALIGN_S1", "銷售單", 150.0)
     items = [_sample_item(150.0)]
     path = generate_invoice_excel(data, items)
-    ws = load_workbook(path)["銷售"]
+    ws = load_workbook(path)["銷售單"]
     _assert_a4(ws)
     _assert_no_static_labels(ws)
     signed = signed_cash_warehouse_amount(150.0, "銷售單")
@@ -178,7 +179,7 @@ def test_purchase():
     data["destination_location"] = "存 A倉庫"
     items = [{**_sample_item(200.0), "amount": 200.0, "unit_price": 20}]
     path = generate_invoice_excel(data, items)
-    ws = load_workbook(path)["購入"]
+    ws = load_workbook(path)["購入單"]
     _assert_a4(ws)
     _assert_no_static_labels(ws)
     signed = signed_cash_warehouse_amount(200.0, "購入單")
@@ -210,7 +211,7 @@ def test_exchange():
         "amount": None,
     }]
     path = generate_invoice_excel(data, main, exchange)
-    ws = load_workbook(path)["兌料"]
+    ws = load_workbook(path)["兌料單"]
     _assert_a4(ws)
     _assert_no_static_labels(ws)
     assert "ALIGN_T1" in str(ws.cell(row=CUSTOMER_COPY["invoice_no_row"], column=11).value)
@@ -244,7 +245,7 @@ def test_delivery():
         "amount": None,
     }]
     path = generate_invoice_excel(data, items)
-    ws = load_workbook(path)["交收"]
+    ws = load_workbook(path)["交收單"]
     _assert_a4(ws)
     _assert_no_static_labels(ws)
     assert "ALIGN_D1" in str(ws.cell(row=CUSTOMER_COPY["invoice_no_row"], column=11).value)
@@ -273,7 +274,7 @@ def test_overflow_clamp():
     assert estimate_items_block_rows(fitted) <= max_rows
 
     path = generate_invoice_excel(data, items)
-    ws = load_workbook(path)["銷售"]
+    ws = load_workbook(path)["銷售單"]
     notes_cell = ws.cell(row=CUSTOMER_COPY["notes_row"], column=4).value
     assert notes_cell == "備註測試", notes_cell
     assert data.get("print_warning")
